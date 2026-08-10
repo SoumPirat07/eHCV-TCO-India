@@ -246,7 +246,7 @@ const INITIAL_VEHICLES = [
 // ---------------------------------------------------------------------------
 // CORE PER-VEHICLE ENGINE
 // ---------------------------------------------------------------------------
-function computeVehicleMetrics(v, routeSegments, cfg) {
+function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides = {}) {
   const {
     years, dfRate, escGen, escF, escE, escW, escI,
     workingDaysPerMonth, loadingUnloadingTimePerTrip
@@ -344,6 +344,7 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
       const uniqueKey = `${label}_${Math.round(km)}`;
       if (!uniqueChargingStopsMap[uniqueKey]) {
         uniqueChargingStopsMap[uniqueKey] = {
+          key: uniqueKey,
           label,
           km: Math.round(km),
           isDepot,
@@ -466,13 +467,30 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
       const rawStop = uniqueChargingStopsMap[key];
       const chargeSlotsPerDayPerCharger = STATION_DAILY_UPTIME_HRS / Math.max(0.1, rawStop.timePerChargeHrs);
       const dailyChargesAtThisLocation = dailyLoopsAcrossFleet * rawStop.chargesPerLoop;
-      const chargersSized = Math.max(1, Math.ceil(dailyChargesAtThisLocation / chargeSlotsPerDayPerCharger));
+      const autoChargersSized = Math.max(1, Math.ceil(dailyChargesAtThisLocation / chargeSlotsPerDayPerCharger));
+
+      const stopOverride = chargingStationOverrides[v.id]?.[key] || {};
+      const hasChargerOverride = Number.isFinite(stopOverride.chargers);
+      const chargersSized = hasChargerOverride
+        ? Math.max(1, Math.round(stopOverride.chargers))
+        : autoChargersSized;
+      const displayLabel = typeof stopOverride.name === "string" && stopOverride.name.trim()
+        ? stopOverride.name.trim()
+        : rawStop.label;
 
       uniqueStationsCount += 1;
       totalChargersNeeded += chargersSized;
 
       uniqueStationsList.push({
-        ...rawStop, chargersSized, stationSetupCost: v.stationCost, chargersCostSum: chargersSized * v.chargerCost
+        ...rawStop,
+        label: displayLabel,
+        originalLabel: rawStop.label,
+        chargersSized,
+        autoChargersSized,
+        isManualChargerOverride: hasChargerOverride,
+        isManualNameOverride: displayLabel !== rawStop.label,
+        stationSetupCost: v.stationCost,
+        chargersCostSum: chargersSized * v.chargerCost
       });
 
       capitalSetupInfra += (v.stationCost + (chargersSized * v.chargerCost)) * (1 - v.infrastructureTaxCredit / 100);
@@ -706,7 +724,7 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
   };
 }
 
-function findOptimalChargingNetwork(v, routeSegments, cfg) {
+function findOptimalChargingNetwork(v, routeSegments, cfg, chargingStationOverrides = {}) {
   const n = routeSegments.length;
   if (v.type !== "electric" || n === 0 || n > 12) return null;
 
@@ -714,7 +732,7 @@ function findOptimalChargingNetwork(v, routeSegments, cfg) {
   const totalCombos = 1 << n;
   for (let mask = 0; mask < totalCombos; mask++) {
     const candidateSegments = routeSegments.map((s, i) => ({ ...s, hasDepotAtTo: !!(mask & (1 << i)) }));
-    const metrics = computeVehicleMetrics(v, candidateSegments, cfg);
+    const metrics = computeVehicleMetrics(v, candidateSegments, cfg, chargingStationOverrides);
     if (!best || metrics.npvTCOSum < best.npvTCOSum) {
       best = {
         npvTCOSum: metrics.npvTCOSum,
@@ -763,6 +781,10 @@ export default function ComprehensiveTCOCalculator() {
   const [vehicles, setVehicles] = useState(INITIAL_VEHICLES);
   
   const [payloadModes, setPayloadModes] = useState({});
+
+  // Manual charging-station overrides are stored per EV and per generated stop.
+  // Example: { "v-bev-1": { "Terminal Depot (B)_500": { name: "B Hub", chargers: 4 } } }
+  const [chargingStationOverrides, setChargingStationOverrides] = useState({});
 
   const [optimizerResults, setOptimizerResults] = useState({});
   const [optimizerRunning, setOptimizerRunning] = useState(null);
@@ -850,6 +872,10 @@ export default function ComprehensiveTCOCalculator() {
       const { [id]: _removed, ...rest } = prev;
       return rest;
     });
+    setChargingStationOverrides((prev) => {
+      const { [id]: _removed, ...rest } = prev;
+      return rest;
+    });
   };
 
   const updateVehicleProp = (id, prop, val) => {
@@ -913,6 +939,33 @@ export default function ComprehensiveTCOCalculator() {
     );
   };
 
+  const updateChargingStationOverride = (vehicleId, stopKey, prop, value) => {
+    setChargingStationOverrides((prev) => ({
+      ...prev,
+      [vehicleId]: {
+        ...(prev[vehicleId] || {}),
+        [stopKey]: {
+          ...(prev[vehicleId]?.[stopKey] || {}),
+          [prop]: value
+        }
+      }
+    }));
+  };
+
+  const resetChargingStationOverride = (vehicleId, stopKey) => {
+    setChargingStationOverrides((prev) => {
+      const vehicleOverrides = { ...(prev[vehicleId] || {}) };
+      delete vehicleOverrides[stopKey];
+
+      if (Object.keys(vehicleOverrides).length === 0) {
+        const { [vehicleId]: _removed, ...rest } = prev;
+        return rest;
+      }
+
+      return { ...prev, [vehicleId]: vehicleOverrides };
+    });
+  };
+
   const results = useMemo(() => {
     const years = Math.max(1, Math.round(analysisPeriod));
     const cfg = {
@@ -921,7 +974,7 @@ export default function ComprehensiveTCOCalculator() {
       workingDaysPerMonth, loadingUnloadingTimePerTrip
     };
 
-    const computedVehicles = vehicles.map((v) => computeVehicleMetrics(v, routeSegments, cfg));
+    const computedVehicles = vehicles.map((v) => computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides));
 
     const chartData = [{ year: 0 }];
     computedVehicles.forEach((v) => { chartData[0][v.name] = v.cumCostTimeline[0]; });
@@ -976,13 +1029,13 @@ export default function ComprehensiveTCOCalculator() {
     });
 
     return { years, computedVehicles, chartData, cfg, firstDiesel, firstElectric, breakevenYear, radarData, segmentFreightData, timeUtilizationData };
-  }, [ vehicles, routeSegments, workingDaysPerMonth, loadingUnloadingTimePerTrip, analysisPeriod, discountRate, escGeneral, escFuel, escElectricity, escWages, escInfrastructure ]);
+  }, [ vehicles, routeSegments, chargingStationOverrides, workingDaysPerMonth, loadingUnloadingTimePerTrip, analysisPeriod, discountRate, escGeneral, escFuel, escElectricity, escWages, escInfrastructure ]);
 
   const handleRunOptimizer = (vehicleId) => {
     const v = vehicles.find((vv) => vv.id === vehicleId);
     if (!v) return;
     setOptimizerRunning(vehicleId);
-    const best = findOptimalChargingNetwork(v, routeSegments, results.cfg);
+    const best = findOptimalChargingNetwork(v, routeSegments, results.cfg, chargingStationOverrides);
     setOptimizerResults((prev) => ({ ...prev, [vehicleId]: best }));
     setOptimizerRunning(null);
   };
@@ -2056,7 +2109,11 @@ export default function ComprehensiveTCOCalculator() {
               <div className="kpi-label" style={{ color: "var(--bev)" }}>
                 <PlugZap size={16} style={{ marginRight: 6 }} /> Charging Station Sizing (1 Station per Stop, Variable Chargers)
               </div>
-              <div style={{ overflowX: "auto", marginTop: "10px" }}>
+              <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "6px", lineHeight: 1.5 }}>
+                The calculator sizes each stop automatically. Use the override controls below to rename any stop or manually set its number of high-speed chargers.
+                Manual charger values replace the calculated requirement and flow through infrastructure CAPEX, charger maintenance, total charger count, and TCO.
+              </div>
+              <div style={{ overflowX: "auto", marginTop: "12px" }}>
                 <table className="route-table" style={{ background: "var(--panel)", borderRadius: "8px" }}>
                   <thead>
                     <tr>
@@ -2064,23 +2121,95 @@ export default function ComprehensiveTCOCalculator() {
                       <th style={{ textAlign: "right" }}>Cumulative Milepost (km)</th>
                       <th style={{ textAlign: "center" }}>Infrastructure Type</th>
                       <th style={{ textAlign: "center" }}>Dedicated Stations</th>
-                      <th style={{ textAlign: "center" }}>Chargers Required</th>
+                      <th style={{ textAlign: "center" }}>Auto-Sized Chargers</th>
+                      <th style={{ textAlign: "center" }}>Override Chargers</th>
+                      <th style={{ textAlign: "center" }}>Manual Stop Name</th>
                       <th style={{ textAlign: "right" }}>Cost Profile (Ex-Subsidy)</th>
+                      <th style={{ textAlign: "center" }}>Reset</th>
                     </tr>
                   </thead>
                   <tbody>
                     {results.computedVehicles.flatMap(v => {
                       if (v.type !== "electric") return [];
-                      return v.uniqueStationsList.map((st, sIdx) => (
-                        <tr key={`${v.id}_s_${sIdx}`}>
-                          <td><strong>{v.name}</strong> - {st.label}</td>
-                          <td className="num" style={{ textAlign: "right" }}>{st.km} km</td>
-                          <td style={{ textAlign: "center" }}><span className={`badge ${st.isDepot ? "badge-info" : "badge-warn"}`}>{st.isDepot ? "Terminal Depot" : "Highway charger"}</span></td>
-                          <td className="num" style={{ textAlign: "center" }}>1 Station</td>
-                          <td className="num" style={{ textAlign: "center", fontWeight: "bold", color: "var(--bev)" }}>{st.chargersSized} High-Speed Plugs</td>
-                          <td className="num" style={{ textAlign: "right" }}>{inr(st.stationSetupCost + st.chargersCostSum)}</td>
-                        </tr>
-                      ));
+                      return v.uniqueStationsList.map((st, sIdx) => {
+                        const override = chargingStationOverrides[v.id]?.[st.key] || {};
+                        const hasChargerOverride = Number.isFinite(override.chargers);
+                        const effectiveChargers = st.chargersSized;
+                        const belowAuto = hasChargerOverride && effectiveChargers < st.autoChargersSized;
+
+                        return (
+                          <tr key={`${v.id}_s_${sIdx}`}>
+                            <td>
+                              <strong>{v.name}</strong> - {st.label}
+                              {(st.isManualNameOverride || st.isManualChargerOverride) && (
+                                <div style={{ fontSize: "10px", color: "var(--bev)", marginTop: "3px" }}>
+                                  Manual override active
+                                </div>
+                              )}
+                            </td>
+                            <td className="num" style={{ textAlign: "right" }}>{st.km} km</td>
+                            <td style={{ textAlign: "center" }}>
+                              <span className={`badge ${st.isDepot ? "badge-info" : "badge-warn"}`}>
+                                {st.isDepot ? "Terminal Depot" : "Highway charger"}
+                              </span>
+                            </td>
+                            <td className="num" style={{ textAlign: "center" }}>1 Station</td>
+                            <td className="num" style={{ textAlign: "center" }}>
+                              {st.autoChargersSized} High-Speed Plugs
+                            </td>
+                            <td style={{ minWidth: "145px" }}>
+                              <div className="field-input" style={{ width: "135px", margin: "0 auto" }}>
+                                <input
+                                  type="number"
+                                  min="1"
+                                  step="1"
+                                  value={hasChargerOverride ? override.chargers : st.autoChargersSized}
+                                  onChange={(e) => {
+                                    const value = Math.max(1, Math.round(parseFloat(e.target.value) || 1));
+                                    updateChargingStationOverride(v.id, st.key, "chargers", value);
+                                  }}
+                                  style={{ width: "90px" }}
+                                />
+                                <span className="field-suffix">plugs</span>
+                              </div>
+                              {belowAuto && (
+                                <div style={{ fontSize: "9.5px", color: "var(--bad)", textAlign: "center", marginTop: "3px" }}>
+                                  Below calculated need
+                                </div>
+                              )}
+                            </td>
+                            <td style={{ minWidth: "190px" }}>
+                              <div className="field-input" style={{ width: "180px", margin: "0 auto" }}>
+                                <input
+                                  type="text"
+                                  value={typeof override.name === "string" ? override.name : ""}
+                                  placeholder={st.originalLabel}
+                                  onChange={(e) => updateChargingStationOverride(v.id, st.key, "name", e.target.value)}
+                                  style={{ width: "165px", textAlign: "left" }}
+                                />
+                              </div>
+                            </td>
+                            <td className="num" style={{ textAlign: "right" }}>
+                              {inr(st.stationSetupCost + st.chargersCostSum)}
+                            </td>
+                            <td style={{ textAlign: "center" }}>
+                              {(st.isManualNameOverride || st.isManualChargerOverride) ? (
+                                <button
+                                  className="reset-btn"
+                                  type="button"
+                                  title="Reset this stop to automatic sizing/name"
+                                  onClick={() => resetChargingStationOverride(v.id, st.key)}
+                                  style={{ padding: "6px 8px", margin: "0 auto" }}
+                                >
+                                  <RotateCcw size={13} />
+                                </button>
+                              ) : (
+                                <span style={{ color: "var(--text-dim)", fontSize: "11px" }}>Auto</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      });
                     })}
                   </tbody>
                 </table>
