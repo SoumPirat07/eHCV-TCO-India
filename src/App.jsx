@@ -244,9 +244,11 @@ const INITIAL_VEHICLES = [
 function computeVehicleMetrics(v, routeSegments, cfg) {
   const {
     years, dfRate, escGen, escF, escE, escW, escI,
-    monthlyCargoVolume, workingDaysPerMonth, dailyOperatingLimitHrs, loadingUnloadingTimePerTrip,
+    workingDaysPerMonth, loadingUnloadingTimePerTrip,
     existingFreightRatePerTonneKm
   } = cfg;
+  
+  const dailyOperatingLimitHrs = 24; // Implicit 24h available since utilization logic handles driving vs rest vs charging
 
   const payloadCap = getPayloadCap(v);
   let tripMaxPayload = 0;
@@ -268,7 +270,6 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
     const segPayload = getSegPayload(seg, v.id);
     if (segPayload > tripMaxPayload) tripMaxPayload = segPayload;
     
-    // Only flag as a violation if overloading is disabled
     if (segPayload > payloadCap && !v.allowOverloading) {
       segmentOverloads.push({ segmentIdx: idx + 1, payload: segPayload, cap: payloadCap, from: seg.from, to: seg.to });
     }
@@ -280,7 +281,6 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
 
     let baseEconomy = v.baseUnloadedEconomy - (v.baseUnloadedEconomy - v.baseLoadedEconomy) * payloadRatio;
     
-    // Apply efficiency drop for overloading
     const overloadTonnes = Math.max(0, cappedPayload - payloadCap);
     if (overloadTonnes > 0 && v.overloadPenaltyPctPerTonne) {
       const penaltyFactor = 1 - (overloadTonnes * (v.overloadPenaltyPctPerTonne / 100));
@@ -296,10 +296,6 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
 
   const avgRouteEconomy = weightedEnergyNeeded > 0 ? totalTripDistance / weightedEnergyNeeded : 1.0;
 
-  // Actual tonne-km moved per trip: sum of (capped payload x distance) PER SEGMENT.
-  // (Previously this used the single heaviest-leg payload x the FULL round-trip distance,
-  //  which overstated tonne-km on any loop with an empty/lighter return leg and understated
-  //  cost-per-tonne-km as a result. Fixed here.)
   let tonneKmPerTrip = 0;
   routeSegments.forEach((seg, idx) => {
     tonneKmPerTrip += segmentCappedPayloads[idx] * seg.distance;
@@ -407,10 +403,6 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
     if (currentEnergySinceCharge > 0) recordChargeStop(`Home Base Depot Terminal`, cumulativeDistance, currentSoC, 100, true);
   }
 
-  // General rest/downtime ratio (driver breaks, queuing, yard shunting, etc.) EXCLUDING charging.
-  // Applies uniformly to diesel and electric so both vehicle types get a like-for-like
-  // "general utilization" input, with EVs then getting a separate, additional charging
-  // downtime layered on top to produce the final utilization figure.
   const safeGenUtil = Math.max(1, Math.min(100, v.generalUtilizationPct || 100));
   const generalRestDowntimeHrs = (totalTripDrivingHrs / (safeGenUtil / 100)) - totalTripDrivingHrs;
 
@@ -429,15 +421,7 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
   const totalOperatingHoursAvailableYear = (workingDaysPerMonth * 12 * dailyOperatingLimitHrs) - totalAnnualFixedDowntimeHrs;
   const tripsPerYearPerVehicle = fullTurnaroundCycleHrs > 0 ? totalOperatingHoursAvailableYear / fullTurnaroundCycleHrs : 0;
 
-  // Utilize the overloaded payload correctly for fleet sizing calculations
-  const maxCarriedPayload = v.allowOverloading ? tripMaxPayload : Math.min(tripMaxPayload, payloadCap);
-  const annualCargoThroughputPerVehicle = tripsPerYearPerVehicle * Math.max(0.1, maxCarriedPayload);
-
-  // --- Fleet sizing --------------------------------------------------------
-  // Preferred: size the fleet off PER-SEGMENT monthly tonnage demand (the bottleneck leg -
-  // e.g. a segment that needs more trips/month than its per-trip payload can clear in the
-  // trips this vehicle can physically run). Falls back to the legacy global "Monthly Cargo
-  // Volume Goal" if no segment has a tonnage demand entered (keeps old behaviour intact).
+  // Fleet sizing uses segment demand only
   const segmentDemandTripsNeededPerYear = routeSegments.map((seg, idx) => {
     const demand = seg.monthlyTonnage || 0;
     const segPayload = segmentCappedPayloads[idx];
@@ -447,12 +431,9 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
   const usesSegmentDemand = segmentDemandTripsNeededPerYear.some((x) => x > 0);
   const bottleneckTripsNeededPerYear = Math.max(0, ...segmentDemandTripsNeededPerYear);
 
-  let fleetSizeRequired;
-  if (usesSegmentDemand) {
-    fleetSizeRequired = Math.max(1, Math.ceil(bottleneckTripsNeededPerYear / Math.max(0.01, tripsPerYearPerVehicle)));
-  } else {
-    fleetSizeRequired = Math.max(1, Math.ceil((monthlyCargoVolume * 12) / Math.max(1, annualCargoThroughputPerVehicle)));
-  }
+  let fleetSizeRequired = usesSegmentDemand
+    ? Math.max(1, Math.ceil(bottleneckTripsNeededPerYear / Math.max(0.01, tripsPerYearPerVehicle)))
+    : 1;
 
   const totalTripsAcrossFleetYear = tripsPerYearPerVehicle * fleetSizeRequired;
   const totalDistanceAcrossFleetYear = totalTripsAcrossFleetYear * totalTripDistance;
@@ -524,9 +505,6 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
     const yearFuelOrEnergy = (totalDistanceAcrossFleetYear / avgRouteEconomy) * (v.type === "diesel" ? (v.fuelOrElectricPrice * multF) : (v.electricityRate * multE));
 
     const yearMaint = totalDistanceAcrossFleetYear * v.maintCostPerKm * multGen;
-    // Insurance now tracks a declining Insured Declared Value (IDV), straight-lined down to the
-    // vehicle's own residual % over the analysis window, instead of a flat % of the on-road price
-    // every year (which overstated insurance cost in later years).
     const idvFactor = years > 0 ? (1 - ((1 - v.residualPct / 100) * (t - 1) / years)) : 1;
     const yearIns = totalUpfrontGSTPrice * Math.max(v.residualPct / 100, idvFactor) * (v.insuranceRatePct / 100) * multGen * fleetSizeRequired;
     const yearWages = v.driverSalaryMonthly * 12 * Math.max(1, v.driversPerVehicle || 1) * multW * fleetSizeRequired;
@@ -602,9 +580,6 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
   const totalCargoTonneKmFleet = annualTonneKmFleet * years;
   const costPerTonneKm = totalCargoTonneKmFleet > 0 ? npvTCOSum / totalCargoTonneKmFleet : 0;
 
-  // Freight economics: the rate this operator NEEDS to charge to cover full TCO plus their
-  // targeted operator margin, vs. what an existing/market freight rate (if supplied) would
-  // actually deliver.
   const requiredRevenueNPV = npvTCOSum + npvMarginTarget;
   const requiredFreightRatePerTonneKm = totalCargoTonneKmFleet > 0 ? requiredRevenueNPV / totalCargoTonneKmFleet : 0;
 
@@ -735,9 +710,7 @@ function computeBreakeven(chartData, nameA, nameB) {
 
 export default function ComprehensiveTCOCalculator() {
   const [darkMode, setDarkMode] = useState(true);
-  const [monthlyCargoVolume, setMonthlyCargoVolume] = useState(85000);
   const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(24);
-  const [dailyOperatingLimitHrs, setDailyOperatingLimitHrs] = useState(16);
   const [loadingUnloadingTimePerTrip, setLoadingUnloadingTimePerTrip] = useState(5);
 
   const [analysisPeriod, setAnalysisPeriod] = useState(10);
@@ -758,7 +731,6 @@ export default function ComprehensiveTCOCalculator() {
   const [expandedSegmentId, setExpandedSegmentId] = useState(null);
   const [vehicles, setVehicles] = useState(INITIAL_VEHICLES);
   
-  // Track whether users are entering % or Tonnes for each vehicle in the payload drawer
   const [payloadModes, setPayloadModes] = useState({});
 
   const [optimizerResults, setOptimizerResults] = useState({});
@@ -894,7 +866,6 @@ export default function ComprehensiveTCOCalculator() {
     }
   };
 
-
   const updateStretchPercentage = (segId, roadType, traffic, val) => {
     setRouteSegments(
       routeSegments.map((seg) => {
@@ -913,8 +884,7 @@ export default function ComprehensiveTCOCalculator() {
     const cfg = {
       years, dfRate: discountRate / 100, escGen: escGeneral / 100, escF: escFuel / 100,
       escE: escElectricity / 100, escW: escWages / 100, escI: escInfrastructure / 100,
-      monthlyCargoVolume, workingDaysPerMonth, dailyOperatingLimitHrs, loadingUnloadingTimePerTrip,
-      existingFreightRatePerTonneKm
+      workingDaysPerMonth, loadingUnloadingTimePerTrip, existingFreightRatePerTonneKm
     };
 
     const computedVehicles = vehicles.map((v) => computeVehicleMetrics(v, routeSegments, cfg));
@@ -969,7 +939,7 @@ export default function ComprehensiveTCOCalculator() {
     })) : [];
 
     return { years, computedVehicles, chartData, cfg, firstDiesel, firstElectric, breakevenYear, radarData, tonneKmRateData, profitabilityData };
-  }, [ vehicles, routeSegments, monthlyCargoVolume, workingDaysPerMonth, dailyOperatingLimitHrs, loadingUnloadingTimePerTrip, analysisPeriod, discountRate, escGeneral, escFuel, escElectricity, escWages, escInfrastructure, existingFreightRatePerTonneKm ]);
+  }, [ vehicles, routeSegments, workingDaysPerMonth, loadingUnloadingTimePerTrip, analysisPeriod, discountRate, escGeneral, escFuel, escElectricity, escWages, escInfrastructure, existingFreightRatePerTonneKm ]);
 
   const handleRunOptimizer = (vehicleId) => {
     const v = vehicles.find((vv) => vv.id === vehicleId);
@@ -1099,22 +1069,32 @@ export default function ComprehensiveTCOCalculator() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
 
-        {/* SECTION 1: Logistics Sizing */}
+        {/* SECTION 1: Consolidated General Analysis Settings */}
         <div className="panel">
-          <h2><Package size={18} color="var(--bev)" /> 1. Logistics Sizing</h2>
-          <div className="grid-2">
+          <h2><Settings size={18} color="var(--bev)" /> 1. General Analysis Settings</h2>
+          <div className="grid-3">
             <div>
-              <Field label="Monthly Cargo Volume Goal (fallback)" value={monthlyCargoVolume} onChange={setMonthlyCargoVolume} suffix="Tonnes" step={100} />
+              <div className="section-tag" style={{ marginTop: 0 }}>Logistics & Timeline</div>
               <Field label="Operational Working Days" value={workingDaysPerMonth} onChange={setWorkingDaysPerMonth} suffix="Days/Month" step={1} />
+              <Field label="Turnaround Load/Unload Cost" value={loadingUnloadingTimePerTrip} onChange={setLoadingUnloadingTimePerTrip} suffix="Hours" step={0.5} />
+              <Field label="Analysis Window" value={analysisPeriod} onChange={setAnalysisPeriod} suffix="Years" step={1} />
+              <Field label="Discount Rate (WACC)" value={discountRate} onChange={setDiscountRate} suffix="%" step={0.5} />
             </div>
             <div>
-              <Field label="Operating Hours Limit/Day" value={dailyOperatingLimitHrs} onChange={setDailyOperatingLimitHrs} suffix="Hours/Day" step={1} />
-              <Field label="Turnaround Load/Unload Cost" value={loadingUnloadingTimePerTrip} onChange={setLoadingUnloadingTimePerTrip} suffix="Hours" step={0.5} />
+              <div className="section-tag" style={{ marginTop: 0 }}>Inflation Parameters</div>
+              <Field label="General Inflation Rate" value={escGeneral} onChange={setEscGeneral} suffix="%" step={0.5} />
+              <Field label="Diesel Price Inflation" value={escFuel} onChange={setEscFuel} suffix="%" step={0.5} />
+              <Field label="Electricity Tariff Inflation" value={escElectricity} onChange={setEscElectricity} suffix="%" step={0.5} />
+              <Field label="Wages Inflation" value={escWages} onChange={setEscWages} suffix="%" step={0.5} />
+              <Field label="Depot Leases Inflation" value={escInfrastructure} onChange={setEscInfrastructure} suffix="%" step={0.5} />
             </div>
-          </div>
-          <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "4px", lineHeight: 1.5 }}>
-            <Info size={11} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} />
-            Fleet sizing now prefers the <strong>per-segment Monthly Tonnage Demand</strong> entered in Section 2 below (it sizes off whichever leg is the tightest bottleneck). The goal above is only used as a fallback when no segment has a tonnage demand set.
+            <div>
+              <div className="section-tag" style={{ marginTop: 0 }}>Freight & Margins</div>
+              <Field label="Market Freight Rate" value={existingFreightRatePerTonneKm} onChange={setExistingFreightRatePerTonneKm} suffix="₹/Tonne-km" step={0.5} />
+              <div style={{ fontSize: "11px", color: "var(--text-dim)", lineHeight: 1.4, marginTop: "8px" }}>
+                Optional. Enter an existing market rate to see profitability and margin analysis in the dashboard. Required fleet sizing is driven exclusively by the Monthly Tonnage Demands you configure in the Route Planner below.
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1148,7 +1128,7 @@ export default function ComprehensiveTCOCalculator() {
                         <td><input type="number" value={seg.distance} onChange={(e) => updateSegmentProp(seg.id, "distance", parseFloat(e.target.value) || 0)} /></td>
                         <td>
                           <input type="number" value={seg.monthlyTonnage || 0} step={100} onChange={(e) => updateSegmentProp(seg.id, "monthlyTonnage", parseFloat(e.target.value) || 0)} style={{ width: "95px" }} />
-                          <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "2px" }}>T/month · 0 = not demand-constrained</div>
+                          <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "2px" }}>T/month · 0 = unbounded</div>
                         </td>
                         <td>
                           <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
@@ -1194,7 +1174,6 @@ export default function ComprehensiveTCOCalculator() {
                                     const isWarning = !!payloadWarnings[warnKey];
                                     const isOverloaded = currentVal > cap;
                                     
-                                    // Use capped value when fetching the multiplier (matrix tops out at 60 anyways)
                                     const multiplier = computeWeightedMultiplier(seg.stretches, v.allowOverloading ? currentVal : Math.min(currentVal, cap), v.type);
 
                                     return (
@@ -1298,49 +1277,10 @@ export default function ComprehensiveTCOCalculator() {
           </button>
         </div>
 
-        {/* SECTION 3: Global Economic Overheads */}
-        <div className="panel">
-          <h2><Settings size={18} color="var(--bev)" /> 3. Economic Parameters</h2>
-          <div className="grid-3">
-            <div>
-              <div className="section-tag" style={{ marginTop: 0 }}>Timeline</div>
-              <Field label="Analysis Window" value={analysisPeriod} onChange={setAnalysisPeriod} suffix="Years" step={1} />
-              <Field label="Discount Rate (WACC)" value={discountRate} onChange={setDiscountRate} suffix="%" step={0.5} />
-            </div>
-            <div>
-              <div className="section-tag" style={{ marginTop: 0 }}>Fuel & Inflation</div>
-              <Field label="General Inflation Rate" value={escGeneral} onChange={setEscGeneral} suffix="%" step={0.5} />
-              <Field label="Diesel Price Inflation" value={escFuel} onChange={setEscFuel} suffix="%" step={0.5} />
-            </div>
-            <div>
-              <div className="section-tag" style={{ marginTop: 0 }}>Utility & Staff</div>
-              <Field label="Electricity Tariff Inflation" value={escElectricity} onChange={setEscElectricity} suffix="%" step={0.5} />
-              <Field label="Wages Inflation" value={escWages} onChange={setEscWages} suffix="%" step={0.5} />
-              <Field label="Depot Leases Inflation" value={escInfrastructure} onChange={setEscInfrastructure} suffix="%" step={0.5} />
-            </div>
-          </div>
-        </div>
-
-        {/* SECTION 3.5: Freight commercials */}
-        <div className="panel">
-          <h2><DollarSign size={18} color="var(--bev)" /> 4. Freight Rate & Operator Economics</h2>
-          <div className="grid-2">
-            <div>
-              <Field label="Existing / Market Freight Rate" value={existingFreightRatePerTonneKm} onChange={setExistingFreightRatePerTonneKm} suffix="₹/Tonne-km" step={0.5} />
-              <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "-6px", lineHeight: 1.5 }}>
-                Optional. If you already have a rate you're being paid (or quoting), enter it here — the dashboard below will show whether each vehicle is profitable at that rate, and what margin per tonne-km and per truck/month it actually delivers.
-              </div>
-            </div>
-            <div style={{ fontSize: "11.5px", color: "var(--text-dim)", lineHeight: 1.6 }}>
-              Each vehicle profile (Section 5) now also carries its own <strong>Drivers per Vehicle & Salary</strong>, and an <strong>Operator Margin (₹/truck/month)</strong> — the profit the fleet operator wants to bank per truck, on top of full TCO. Together with the market rate here, this produces a "Required Freight Rate" (what you need to charge) vs. "Achieved Margin" (what the market rate above actually gets you) in the analytics dashboard.
-            </div>
-          </div>
-        </div>
-
-        {/* SECTION 5: Vehicle Configurations */}
+        {/* SECTION 3: Vehicle Configurations */}
         <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h2 style={{ margin: 0, textTransform: "uppercase", fontSize: "18px" }}><Truck size={20} style={{ verticalAlign: "-3px", marginRight: "6px", color: "var(--bev)" }} /> 5. Fleet Vehicle Profiles</h2>
+            <h2 style={{ margin: 0, textTransform: "uppercase", fontSize: "18px" }}><Truck size={20} style={{ verticalAlign: "-3px", marginRight: "6px", color: "var(--bev)" }} /> 3. Fleet Vehicle Profiles</h2>
             <div style={{ display: "flex", gap: "10px" }}>
               <button className="theme-btn" style={{ borderColor: "var(--diesel)", background: "rgba(226, 149, 50, 0.04)" }} onClick={() => handleAddVehicle("diesel")}>
                 <Plus size={14} /> Add Diesel Vehicle
@@ -1605,7 +1545,7 @@ export default function ComprehensiveTCOCalculator() {
           </div>
         </div>
 
-        {/* SECTION 6: Safety Warnings */}
+        {/* SECTION 4: Safety Warnings */}
         {results.computedVehicles.some(v => v.segmentOverloads.length > 0) && (
           <div className="alert-strip">
             <AlertTriangle size={20} style={{ flexShrink: 0, color: "var(--bad)" }} />
@@ -1639,9 +1579,9 @@ export default function ComprehensiveTCOCalculator() {
           </div>
         )}
 
-        {/* SECTION 7: Analytics Dashboard */}
+        {/* SECTION 5: Analytics Dashboard */}
         <div className="panel" style={{ border: "2px solid var(--bev)", boxShadow: "var(--shadow-glow)" }}>
-          <h2 style={{ color: "var(--bev)" }}><TrendingUp size={20} /> 6. TCO & Freight Rate Analytics</h2>
+          <h2 style={{ color: "var(--bev)" }}><TrendingUp size={20} /> 4. TCO & Freight Rate Analytics</h2>
 
           <label className="toggle-row" style={{ marginBottom: "16px" }}>
             <input type="checkbox" checked={logScaleCharts} onChange={(e) => setLogScaleCharts(e.target.checked)} style={{ width: "14px", height: "14px", accentColor: "var(--bev)", cursor: "pointer" }} />
@@ -1652,7 +1592,7 @@ export default function ComprehensiveTCOCalculator() {
           <div className="kpi-grid">
             {results.computedVehicles.map((v, idx) => (
               <div key={v.id} className="kpi-card" style={{ borderTop: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
-                <div className="kpi-label">{v.name} ({v.fleetSizeRequired} Units Sized{v.usesSegmentDemand ? ", segment-demand bottleneck" : ", fallback goal"})</div>
+                <div className="kpi-label">{v.name} ({v.fleetSizeRequired} Units Sized{v.usesSegmentDemand ? " (Demand Sized)" : " (Single Unit Default)"})</div>
                 <div className="kpi-val num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>
                   {inrCompact(v.npvTCOSum)}
                 </div>
