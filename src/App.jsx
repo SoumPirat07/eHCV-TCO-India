@@ -3,11 +3,12 @@ import {
   Truck, Zap, Fuel, BatteryCharging, TrendingUp,
   Package, Info, RotateCcw, PlugZap,
   Plus, Trash2, MapPin, Settings, Sun, Moon, AlertTriangle, CheckCircle2,
-  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3
+  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, BarChart, Bar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar
+  ResponsiveContainer, BarChart, Bar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
+  LabelList, PieChart, Pie, Cell
 } from "recharts";
 
 // 1. Core Lookup Matrix for DIESEL Duty Cycle Efficiency
@@ -70,6 +71,8 @@ const EV_EFFICIENCY_MATRIX = {
 
 const ROAD_TYPES = Object.keys(DIESEL_EFFICIENCY_MATRIX);
 const TRAFFIC_CONDITIONS = ["High", "Medium", "Low"];
+
+const PIE_COLORS = ['#38bdf8', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#64748b', '#14b8a6', '#f97316', '#8b5cf6'];
 
 function interpolateEfficiency(roadType, traffic, payload, vehicleType = "diesel") {
   const activeMatrix = vehicleType === "electric" ? EV_EFFICIENCY_MATRIX : DIESEL_EFFICIENCY_MATRIX;
@@ -142,7 +145,6 @@ const DEFAULT_ROUTE = [
   { id: "3", from: "C", to: "A", distance: 550, avgSpeed: 35, stretches: generateDefaultStretches(), hasDepotAtTo: true, payloadByVehicle: { "v-diesel-1": 38, "v-bev-1": 36.5 } }
 ];
 
-const VEHICLE_COLORS = ["#21bfa9", "#896331", "#b16af0", "#38bdf8", "#ec4899", "#10b981"];
 const EV_SHADES = ["#21bfa9", "#38bdf8", "#10b981", "#5eead4"];
 const DIESEL_SHADES = ["#e29532", "#f59e0b", "#ec4899", "#fb923c"];
 
@@ -165,6 +167,9 @@ const INITIAL_VEHICLES = [
     baseUnloadedEconomy: 4, 
     baseLoadedEconomy: 3, 
     fuelOrElectricPrice: 96,
+    fuelCapacityLitres: 365,
+    safeFuelThreshold: 5,
+    refuelTimeMins: 20,
     maintCostPerKm: 2.5,
     insuranceRatePct: 1.5,
     residualPct: 10,
@@ -219,7 +224,7 @@ const INITIAL_VEHICLES = [
     tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000,
     scheduledDowntimeDays: 12,
     unscheduledDowntimeHrs: 100,
-    safeSoCThreshold: 15,
+    safeSoCThreshold: 10,
     stationCost: 5000000,
     stationMaintenance: 120000,
     chargerCost: 1500000,
@@ -231,7 +236,7 @@ const INITIAL_VEHICLES = [
     depotLandLeaseMonthly: 120000,
     depotDemandChargesMonthly: 80000,
     useDynamicSOHLimit: true,
-    generalUtilizationPct: 52.2,
+    generalUtilizationPct: 51.9,
     miscCostPerMonth: 10000,
     miscCostNotes: "Chai/Paani",
     operatorMarginPerTruckMonthly: 25000,
@@ -305,6 +310,8 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
   let criticalSOHLimit = 20.0;
   let maxEnergyLegKWh = 0;
   let chargingDowntimeHrs = 0;
+  let refuelingDowntimeHrs = 0;
+  let refuelingStopsCount = 0;
 
   if (v.type === "electric" && v.batteryCapacity > 0) {
     let currentSoC = 100;
@@ -400,6 +407,14 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
     });
 
     if (currentEnergySinceCharge > 0) recordChargeStop(`Home Base Depot Terminal`, cumulativeDistance, currentSoC, 100, true);
+  } else if (v.type === "diesel" && v.fuelCapacityLitres > 0) {
+    let totalFuelConsumed = 0;
+    routeSegments.forEach((seg, idx) => {
+      totalFuelConsumed += seg.distance / Math.max(0.01, segmentEconomies[idx]);
+    });
+    const usableFuel = v.fuelCapacityLitres * (1 - ((v.safeFuelThreshold || 15) / 100));
+    refuelingStopsCount = totalFuelConsumed / Math.max(1, usableFuel);
+    refuelingDowntimeHrs = refuelingStopsCount * ((v.refuelTimeMins || 20) / 60);
   }
 
   const safeGenUtil = Math.max(1, Math.min(100, v.generalUtilizationPct || 100));
@@ -411,7 +426,7 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
 
   const chargingStopsCount = stopsLog.length;
   const totalAnnualFixedDowntimeHrs = (v.scheduledDowntimeDays * 24) + v.unscheduledDowntimeHrs;
-  const fullTurnaroundCycleHrs = totalTripDrivingHrs + loadingUnloadingTimePerTrip + chargingDowntimeHrs + generalRestDowntimeHrs;
+  const fullTurnaroundCycleHrs = totalTripDrivingHrs + loadingUnloadingTimePerTrip + chargingDowntimeHrs + refuelingDowntimeHrs + generalRestDowntimeHrs;
 
   const utilizationPctComputed = fullTurnaroundCycleHrs > 0
     ? (totalTripDrivingHrs / fullTurnaroundCycleHrs) * 100
@@ -579,7 +594,7 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
   
   const marginMultiplier = npvTCOSum > 0 ? requiredRevenueNPV / npvTCOSum : 1;
 
-  const maxTheoreticalRange = v.type === "electric" ? v.batteryCapacity * avgRouteEconomy : 0;
+  const maxTheoreticalRange = v.type === "electric" ? v.batteryCapacity * avgRouteEconomy : (v.type === "diesel" ? v.fuelCapacityLitres * avgRouteEconomy : 0);
   const operationalRangeAtStart = v.type === "electric" ? v.batteryCapacity * ((100 - v.safeSoCThreshold) / 100) * avgRouteEconomy : 0;
   const operationalRangeAtSOHLimit = v.type === "electric" ? operationalRangeAtStart * (resolvedSOHReplacementLimit / 100) : 0;
 
@@ -591,37 +606,52 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
     breakdown.tolls + breakdown.infraMaintenance + breakdown.misc + breakdown.batteryReplacements + breakdown.residuals;
   const totalTripsOverLife = Math.max(1, totalTripsAcrossFleetYear * years);
   const fixedCostPerTrip = fixedCostBucketNPV / totalTripsOverLife;
-  const safeTotalTripDrivingHrs = Math.max(0.01, totalTripDrivingHrs);
+  
+  // Calculate total loop cost mapping empty miles dynamically
+  let totalOperatingCostTrip = 0;
+  routeSegments.forEach((seg, idx) => {
+      const segEconomy = Math.max(0.01, segmentEconomies[idx]);
+      const fuelPricePerUnit = v.type === "diesel" ? v.fuelOrElectricPrice : v.electricityRate;
+      const fuelCostPerKm = fuelPricePerUnit / segEconomy;
+      const operatingCostPerKm = fuelCostPerKm + v.maintCostPerKm + tyreCostPerKmFlat;
+      totalOperatingCostTrip += operatingCostPerKm * seg.distance;
+  });
+  
+  const totalTripCost = totalOperatingCostTrip + fixedCostPerTrip;
+  const totalTripRequiredRevenue = totalTripCost * marginMultiplier;
+
+  // By dividing the entire loop cost by the useful Tonne-KMs done in the loop, 
+  // we socialise empty miles appropriately.
+  const loopCostPerTonneKm = tonneKmPerTrip > 0 ? totalTripCost / tonneKmPerTrip : 0;
+  const loopFreightRatePerTonneKm = tonneKmPerTrip > 0 ? totalTripRequiredRevenue / tonneKmPerTrip : 0;
 
   let totalFreightRatePerTonneTrip = 0;
 
   const segmentCostPerTonneKm = routeSegments.map((seg, idx) => {
+    const cappedPayload = segmentCappedPayloads[idx];
+    
+    // Direct cost attribution for information display (doesn't socialise empty miles)
     const segEconomy = Math.max(0.01, segmentEconomies[idx]);
     const fuelPricePerUnit = v.type === "diesel" ? v.fuelOrElectricPrice : v.electricityRate;
     const fuelCostPerKm = fuelPricePerUnit / segEconomy;
     const operatingCostPerKm = fuelCostPerKm + v.maintCostPerKm + tyreCostPerKmFlat;
-
-    const timeShare = segmentDrivingHours[idx] / safeTotalTripDrivingHrs;
-    const allocatedFixedCost = fixedCostPerTrip * timeShare;
-    const fullCostPerKm = operatingCostPerKm + (allocatedFixedCost / Math.max(0.01, seg.distance));
     
-    const segmentTotalCost = (operatingCostPerKm * seg.distance) + allocatedFixedCost;
-    const segmentRequiredRevenue = segmentTotalCost * marginMultiplier;
-
-    const cappedPayload = segmentCappedPayloads[idx];
-    const costPerTonneKmSeg = cappedPayload > 0 ? fullCostPerKm / cappedPayload : null;
-    const operatingCostPerTonneKmSeg = cappedPayload > 0 ? operatingCostPerKm / cappedPayload : null;
+    // Socialised Rates
+    const costPerTonneKmSeg = cappedPayload > 0 ? loopCostPerTonneKm : null;
+    const freightRatePerTonneKmSeg = cappedPayload > 0 ? loopFreightRatePerTonneKm : null;
     
-    const costPerTonneSeg = cappedPayload > 0 ? segmentTotalCost / cappedPayload : null;
-    const freightRatePerTonneSeg = cappedPayload > 0 ? segmentRequiredRevenue / cappedPayload : null;
+    const costPerTonneSeg = cappedPayload > 0 ? loopCostPerTonneKm * seg.distance : null;
+    const freightRatePerTonneSeg = cappedPayload > 0 ? loopFreightRatePerTonneKm * seg.distance : null;
     
     if (freightRatePerTonneSeg) {
+        // Technically loop Rs/Ton isn't straight addition if payloads are different per segment.
+        // But for identical payload loops, it is correct.
         totalFreightRatePerTonneTrip += freightRatePerTonneSeg;
     }
 
     return {
       from: seg.from, to: seg.to, distance: seg.distance, payload: cappedPayload,
-      operatingCostPerKm, fullCostPerKm, costPerTonneKmSeg, operatingCostPerTonneKmSeg,
+      operatingCostPerKm, costPerTonneKmSeg, freightRatePerTonneKmSeg,
       costPerTonneSeg, freightRatePerTonneSeg
     };
   });
@@ -632,6 +662,8 @@ function computeVehicleMetrics(v, routeSegments, cfg) {
     avgRouteEconomy,
     chargingStopsCount,
     chargingDowntimeHrs,
+    refuelingDowntimeHrs,
+    refuelingStopsCount,
     generalRestDowntimeHrs,
     drivingHrs: totalTripDrivingHrs,
     loadUnloadHrs: loadingUnloadingTimePerTrip,
@@ -712,7 +744,7 @@ function computeBreakeven(chartData, nameA, nameB) {
 
 export default function ComprehensiveTCOCalculator() {
   const [darkMode, setDarkMode] = useState(true);
-  const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(24);
+  const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(30);
   const [loadingUnloadingTimePerTrip, setLoadingUnloadingTimePerTrip] = useState(5);
 
   const [analysisPeriod, setAnalysisPeriod] = useState(10);
@@ -774,6 +806,9 @@ export default function ComprehensiveTCOCalculator() {
 
     if (type === "diesel") {
       baseDefault.fuelOrElectricPrice = 94;
+      baseDefault.fuelCapacityLitres = 400;
+      baseDefault.safeFuelThreshold = 15;
+      baseDefault.refuelTimeMins = 20;
     } else {
       baseDefault.batteryCapacity = 500;
       baseDefault.batteryReplacementCost = 3800000;
@@ -935,8 +970,8 @@ export default function ComprehensiveTCOCalculator() {
         name: v.name,
         "Driving": (v.drivingHrs / total) * 100,
         "Load/Unload": (v.loadUnloadHrs / total) * 100,
-        "Charging": (v.chargingHrs / total) * 100,
-        "Rest/Queue": (v.restHrs / total) * 100,
+        "Refuel / Charge": ((v.chargingDowntimeHrs + (v.refuelingDowntimeHrs || 0)) / total) * 100,
+        "Rest/Queue": (v.generalRestDowntimeHrs / total) * 100,
       };
     });
 
@@ -956,6 +991,28 @@ export default function ComprehensiveTCOCalculator() {
     const best = optimizerResults[vehicleId];
     if (!best || best.depotFlags.length !== routeSegments.length) return; 
     setRouteSegments(routeSegments.map((s, i) => ({ ...s, hasDepotAtTo: best.depotFlags[i] })));
+  };
+
+  const renderCustomBarLabel = (props) => {
+    const { x, y, width, payload, dataKey } = props;
+    const baselineKey = results.computedVehicles[0]?.name;
+    if (!payload || !baselineKey || dataKey === baselineKey) return null;
+    
+    const baseValue = payload[baselineKey];
+    const currentValue = payload[dataKey];
+    if (!baseValue || !currentValue) return null;
+
+    const diff = (currentValue - baseValue) / baseValue;
+    if (Math.abs(diff) < 0.01) return null;
+    
+    const isUp = diff > 0;
+    const color = isUp ? "var(--bad)" : "var(--good)";
+
+    return (
+      <text x={x + width / 2} y={y - 6} fill={color} fontSize="11" textAnchor="middle" fontWeight="bold">
+        {isUp ? "↑" : "↓"} {Math.abs(diff * 100).toFixed(0)}%
+      </text>
+    );
   };
 
   return (
@@ -1040,8 +1097,11 @@ export default function ComprehensiveTCOCalculator() {
         .seg-cost-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
         .seg-cost-table th { text-align: right; padding: 8px 10px; color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; border-bottom: 2px solid var(--border); }
         .seg-cost-table th:first-child { text-align: left; }
-        .seg-cost-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+        .seg-cost-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
         .seg-cost-table td:first-child { text-align: left; color: var(--text-dim); }
+        .pie-chart-container { display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        .pie-legend { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; font-size: 11px; }
+        .pie-legend-item { display: flex; align-items: center; gap: 4px; color: var(--text-dim); }
       `}</style>
 
       {/* Header controls */}
@@ -1332,6 +1392,15 @@ export default function ComprehensiveTCOCalculator() {
                   <Field label="Diesel Retail Price" value={v.fuelOrElectricPrice} onChange={(val) => updateVehicleProp(v.id, "fuelOrElectricPrice", val)} suffix="₹/l" step={0.5} />
                 )}
 
+                {v.type === "diesel" && (
+                  <>
+                    <div className="section-tag">Fuel & Range Parameters</div>
+                    <Field label="Fuel Tank Capacity" value={v.fuelCapacityLitres} onChange={(val) => updateVehicleProp(v.id, "fuelCapacityLitres", val)} suffix="Liters" step={10} />
+                    <Field label="Reserve Safe Limit Margin" value={v.safeFuelThreshold} onChange={(val) => updateVehicleProp(v.id, "safeFuelThreshold", val)} suffix="%" step={1} />
+                    <Field label="Time Per Refuel Stop" value={v.refuelTimeMins} onChange={(val) => updateVehicleProp(v.id, "refuelTimeMins", val)} suffix="Mins" step={5} />
+                  </>
+                )}
+
                 {v.type === "electric" && (
                   <>
                     <div className="section-tag">Battery & Cycle Sizing</div>
@@ -1391,17 +1460,20 @@ export default function ComprehensiveTCOCalculator() {
                 <div className="section-tag">Downtime & Utilization</div>
                 <Field label="General Utilization (driving ÷ driving+rest, excl. charging)" value={v.generalUtilizationPct} onChange={(val) => updateVehicleProp(v.id, "generalUtilizationPct", val)} suffix="%" step={1} min={1} max={100} />
                 <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginTop: "-8px", marginBottom: "10px" }}>
-                  Governs driver rest / queuing / yard time relative to pure driving time, for BOTH vehicle types. Load/unload time and (for EVs) charging time are added separately, on top of this.
+                  Governs driver rest / queuing / yard time relative to pure driving time, for BOTH vehicle types. Load/unload time and refuel/charging time are added separately, on top of this.
                 </div>
                 <Field label="Scheduled Service (per vehicle)" value={v.scheduledDowntimeDays} onChange={(val) => updateVehicleProp(v.id, "scheduledDowntimeDays", val)} suffix="Days/Year" step={1} />
                 <Field label="Unscheduled Outages (per vehicle)" value={v.unscheduledDowntimeHrs} onChange={(val) => updateVehicleProp(v.id, "unscheduledDowntimeHrs", val)} suffix="Hours/Year" step={1} />
                 {currentComputed && (
                   <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "-4px", lineHeight: 1.6 }}>
-                    General utilization (input, excl. charging): <strong className="num" style={{ color: "var(--text)" }}>{v.generalUtilizationPct}%</strong><br />
+                    General utilization (input, excl. energy fill): <strong className="num" style={{ color: "var(--text)" }}>{v.generalUtilizationPct}%</strong><br />
                     {v.type === "electric" && (
                       <>Charging downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.chargingDowntimeHrs.toFixed(2)} hrs</strong><br /></>
                     )}
-                    Final utilization (driving ÷ full turnaround, incl. load/unload{v.type === "electric" ? " & charging" : ""}): <strong className="num" style={{ color: "var(--bev)" }}>{currentComputed.utilizationPctComputed.toFixed(1)}%</strong>
+                    {v.type === "diesel" && (
+                      <>Refueling downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.refuelingDowntimeHrs.toFixed(2)} hrs</strong><br /></>
+                    )}
+                    Final utilization (driving ÷ full turnaround, incl. load/unload & energy fill): <strong className="num" style={{ color: "var(--bev)" }}>{currentComputed.utilizationPctComputed.toFixed(1)}%</strong>
                   </div>
                 )}
 
@@ -1606,7 +1678,7 @@ export default function ComprehensiveTCOCalculator() {
                   ) : (
                     <>
                       Sized Diesel Fleet Size: <strong className="num" style={{ color: "var(--diesel)" }}>{v.fleetSizeRequired} Deployments</strong><br />
-                      Charging Stops: <strong className="num">0</strong>
+                      Avg. Refuels/Loop: <strong className="num">{v.refuelingStopsCount.toFixed(1)} Stops</strong>
                     </>
                   )}
                 </div>
@@ -1617,10 +1689,10 @@ export default function ComprehensiveTCOCalculator() {
           <div style={{ marginTop: "8px", marginBottom: "24px" }}>
             <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
               <Route size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-              Cost & Estimated Freight Rate (₹/Ton) by Segment
+              Cost & Estimated Freight Rate by Segment
             </h3>
-            <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px" }}>
-              Freight rates per Tonne are calculated by allocating fuel, maintenance, tolls, capital expenses, margins, and all other costs proportionally to each loaded route segment. Empty return segments are handled as non-revenue-generating legs in overall overheads.
+            <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px", lineHeight: 1.5 }}>
+              Freight rates per Tonne and per Tonne-Km are calculated by dynamically socializing the cost of unladen return trips across the revenue-generating (loaded) segments. Empty segments show "Empty payload" but their operating and time costs heavily impact the rates of the loaded segments!
             </div>
             <div style={{ overflowX: "auto" }}>
               <table className="seg-cost-table">
@@ -1628,20 +1700,23 @@ export default function ComprehensiveTCOCalculator() {
                   <tr>
                     <th>Segment / Vehicle</th>
                     {results.computedVehicles.map((v) => (
-                      <th key={v.id} style={{ color: colorForVehicle(v, results.computedVehicles) }}>{v.name}</th>
+                      <th key={v.id} style={{ color: colorForVehicle(v, results.computedVehicles), minWidth: '150px' }}>{v.name}</th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
                   <tr style={{ background: "var(--panel-alt)" }}>
-                    <td><strong>Total Freight Rate (Full Trip Loop)</strong></td>
+                    <td><strong>Total Loop (Socialized)</strong></td>
                     {results.computedVehicles.map((v) => (
-                      <td key={v.id} className="num" style={{ fontWeight: 700, color: colorForVehicle(v, results.computedVehicles) }}>₹{Math.round(v.totalFreightRatePerTonneTrip)} / Ton</td>
+                      <td key={v.id} className="num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>
+                        <div style={{ fontWeight: 700 }}>₹{Math.round(v.totalFreightRatePerTonneTrip)} / Ton</div>
+                        <div style={{ fontSize: "11px", fontWeight: 600, marginTop: "2px" }}>₹{v.requiredFreightRatePerTonneKm.toFixed(3)} / Ton-km</div>
+                      </td>
                     ))}
                   </tr>
                   {routeSegments.map((seg, segIdx) => (
                     <tr key={seg.id}>
-                      <td>{seg.from} → {seg.to} <span style={{ color: "var(--text-dim)" }}>({seg.distance} km{seg.monthlyTonnage > 0 ? `, ${seg.monthlyTonnage.toLocaleString("en-IN")}T/mo demand` : ""})</span></td>
+                      <td>{seg.from} → {seg.to} <span style={{ color: "var(--text-dim)", display: "block", fontSize: "11px", marginTop: "2px" }}>({seg.distance} km{seg.monthlyTonnage > 0 ? `, ${seg.monthlyTonnage.toLocaleString("en-IN")}T/mo` : ""})</span></td>
                       {results.computedVehicles.map((v) => {
                         const segData = v.segmentCostPerTonneKm[segIdx];
                         if (!segData || segData.freightRatePerTonneSeg === null) return (
@@ -1652,8 +1727,9 @@ export default function ComprehensiveTCOCalculator() {
                         
                         return (
                           <td key={v.id} className="num">
-                            <div>₹{Math.round(segData.freightRatePerTonneSeg)} / Ton</div>
-                            <div style={{ fontSize: "10.5px", color: "var(--text-dim)", fontWeight: 400 }}>Base cost: ₹{Math.round(segData.costPerTonneSeg)} / Ton</div>
+                            <div style={{ fontWeight: 600, color: "var(--text)" }}>₹{Math.round(segData.freightRatePerTonneSeg)} / Ton</div>
+                            <div style={{ fontSize: "11px", color: "var(--text)", marginTop: "2px" }}>₹{segData.freightRatePerTonneKmSeg.toFixed(3)} / Ton-km</div>
+                            <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "4px" }}>Base cost: ₹{Math.round(segData.costPerTonneSeg)}/t</div>
                           </td>
                         );
                       })}
@@ -1700,10 +1776,161 @@ export default function ComprehensiveTCOCalculator() {
                  <Legend wrapperStyle={{ fontSize: 12 }} />
                  <Bar dataKey="Driving" stackId="a" fill="var(--bev)" />
                  <Bar dataKey="Load/Unload" stackId="a" fill="#8b5cf6" />
-                 <Bar dataKey="Charging" stackId="a" fill="#ef4444" />
+                 <Bar dataKey="Refuel / Charge" stackId="a" fill="#ef4444" />
                  <Bar dataKey="Rest/Queue" stackId="a" fill="#6b7280" />
                </BarChart>
              </ResponsiveContainer>
+          </div>
+
+          <div style={{ marginTop: "32px" }}>
+            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+              NPV Cost Accrual Over Project Horizon ({results.years} Years)
+            </h3>
+            <div className="legend-row">
+              {results.computedVehicles.map((v, idx) => (
+                <span key={v.id}>
+                  <span className="legend-dot" style={{ background: colorForVehicle(v, results.computedVehicles) }} />
+                  {v.name}
+                </span>
+              ))}
+            </div>
+            <ResponsiveContainer width="100%" height={340}>
+              <LineChart data={results.chartData} margin={{ top: 10, right: 30, left: 10, bottom: 25 }}>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="year"
+                  stroke="var(--text-dim)"
+                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
+                  label={{ value: "Operating Year", position: "insideBottom", offset: -12, style: { fill: "var(--text-dim)", fontSize: 12 } }}
+                />
+                <YAxis
+                  stroke="var(--text-dim)"
+                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
+                  tickFormatter={(v) => inrCompact(v)}
+                  width={80}
+                  label={{ value: "Cumulative NPV Cost", angle: -90, position: "insideLeft", style: { fill: "var(--text-dim)", fontSize: 12, textAnchor: "middle" } }}
+                />
+                <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
+                {results.computedVehicles.map((v, idx) => (
+                  <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.5} dot={{ r: 3 }} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ marginTop: "32px" }}>
+            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+              NPV Cost Category Breakdown Comparison (with % difference vs baseline)
+            </h3>
+            <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "12px" }}>
+              Percentage labels above bars show the relative difference (+/-) from the baseline vehicle (the first vehicle).
+            </div>
+            <ResponsiveContainer width="100%" height={380}>
+              <BarChart
+                data={[
+                  { category: "Capital & Infra", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.upfront }), {}) },
+                  { category: "Fuel/Energy", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.fuelOrEnergy }), {}) },
+                  { category: "EMI/Debt", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.emi }), {}) },
+                  { category: "Maint & Ins", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.maintenance + v.breakdown.insurance }), {}) },
+                  { category: "Wages & Drivers", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.wages }), {}) },
+                  { category: "Operator Margin", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.operatorMargin }), {}) },
+                  { category: "Tolls & Tyres", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.tolls + v.breakdown.tyres }), {}) },
+                  { category: "Battery Swaps", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.batteryReplacements }), {}) },
+                  { category: "Depot Upkeep", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.infraMaintenance }), {}) },
+                  { category: "Misc", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.misc }), {}) }
+                ]}
+                margin={{ top: 20, right: 30, left: 10, bottom: 70 }}
+              >
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                <XAxis
+                  dataKey="category"
+                  stroke="var(--text-dim)"
+                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
+                  interval={0}
+                  angle={-35}
+                  textAnchor="end"
+                  height={70}
+                />
+                <YAxis
+                  stroke="var(--text-dim)"
+                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
+                  tickFormatter={(v) => inrCompact(v)}
+                  width={80}
+                />
+                <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
+                <Legend wrapperStyle={{ fontSize: 12, top: 0 }} />
+                {results.computedVehicles.map((v, idx) => (
+                  <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)}>
+                     {idx > 0 && <LabelList dataKey={v.name} content={(props) => renderCustomBarLabel(props)} />}
+                  </Bar>
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div style={{ marginTop: "32px", marginBottom: "16px" }}>
+            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+              <PieChartIcon size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+              Cost Breakdown Split (Per Vehicle)
+            </h3>
+            
+            <div className="grid-auto-fit">
+              {results.computedVehicles.map((v, vIdx) => {
+                const pieDataRaw = [
+                  { name: "Capital & Infra", value: v.breakdown.upfront },
+                  { name: "Fuel/Energy", value: v.breakdown.fuelOrEnergy },
+                  { name: "EMI/Debt", value: v.breakdown.emi },
+                  { name: "Maintenance & Ins", value: v.breakdown.maintenance + v.breakdown.insurance },
+                  { name: "Wages & Drivers", value: v.breakdown.wages },
+                  { name: "Tolls & Tyres", value: v.breakdown.tolls + v.breakdown.tyres },
+                  { name: "Battery Replacements", value: v.breakdown.batteryReplacements },
+                  { name: "Depot Upkeep", value: v.breakdown.infraMaintenance },
+                  { name: "Misc Overheads", value: v.breakdown.misc },
+                  { name: "Operator Margin", value: v.breakdown.operatorMargin }
+                ].filter(d => d.value > 0);
+
+                const totalValue = pieDataRaw.reduce((acc, d) => acc + d.value, 0);
+                
+                // Keep the original objects to ensure indices match colors
+                return (
+                  <div key={v.id} className="kpi-card pie-chart-container" style={{ borderLeft: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
+                    <div className="kpi-label" style={{ marginBottom: "16px", alignSelf: "flex-start" }}>{v.name} Total TCO Split</div>
+                    <ResponsiveContainer width="100%" height={240}>
+                      <PieChart>
+                        <Pie
+                          data={pieDataRaw}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={65}
+                          outerRadius={95}
+                          paddingAngle={2}
+                          dataKey="value"
+                        >
+                          {pieDataRaw.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                          ))}
+                        </Pie>
+                        <Tooltip 
+                          contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "12px", borderRadius: "8px" }} 
+                          formatter={(value, name) => [inr(value), name]} 
+                        />
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="pie-legend">
+                      {pieDataRaw.map((entry, index) => {
+                        const pct = ((entry.value / totalValue) * 100).toFixed(1);
+                        return (
+                          <div key={index} className="pie-legend-item">
+                            <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: PIE_COLORS[index % PIE_COLORS.length] }}></span>
+                            <span>{entry.name} ({pct}%)</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {results.computedVehicles.some(v => v.type === "electric") && (
@@ -1861,87 +2088,6 @@ export default function ComprehensiveTCOCalculator() {
             </div>
           )}
 
-
-          <div style={{ marginTop: "24px" }}>
-            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-              NPV Cost Accrual Over Project Horizon ({results.years} Years)
-            </h3>
-            <div className="legend-row">
-              {results.computedVehicles.map((v, idx) => (
-                <span key={v.id}>
-                  <span className="legend-dot" style={{ background: colorForVehicle(v, results.computedVehicles) }} />
-                  {v.name}
-                </span>
-              ))}
-            </div>
-            <ResponsiveContainer width="100%" height={340}>
-              <LineChart data={results.chartData} margin={{ top: 10, right: 30, left: 10, bottom: 25 }}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="year"
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  label={{ value: "Operating Year", position: "insideBottom", offset: -12, style: { fill: "var(--text-dim)", fontSize: 12 } }}
-                />
-                <YAxis
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  tickFormatter={(v) => inrCompact(v)}
-                  width={80}
-                  label={{ value: "Cumulative NPV Cost", angle: -90, position: "insideLeft", style: { fill: "var(--text-dim)", fontSize: 12, textAnchor: "middle" } }}
-                />
-                <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
-                {results.computedVehicles.map((v, idx) => (
-                  <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.5} dot={{ r: 3 }} />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div style={{ marginTop: "32px" }}>
-            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-              NPV Cost Category breakdown comparison
-            </h3>
-            <ResponsiveContainer width="100%" height={380}>
-              <BarChart
-                data={[
-                  { category: "Capital & Infra", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.upfront }), {}) },
-                  { category: "Fuel/Energy", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.fuelOrEnergy }), {}) },
-                  { category: "EMI/Debt", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.emi }), {}) },
-                  { category: "Maint & Ins", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.maintenance + v.breakdown.insurance }), {}) },
-                  { category: "Wages & Drivers", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.wages }), {}) },
-                  { category: "Operator Margin", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.operatorMargin }), {}) },
-                  { category: "Misc", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.misc }), {}) },
-                  { category: "Tolls & Tyres", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.tolls + v.breakdown.tyres }), {}) },
-                  { category: "Battery Swaps", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.batteryReplacements }), {}) },
-                  { category: "Depot Upkeep", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.infraMaintenance }), {}) }
-                ]}
-                margin={{ top: 10, right: 30, left: 10, bottom: 70 }}
-              >
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="category"
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  interval={0}
-                  angle={-35}
-                  textAnchor="end"
-                  height={70}
-                />
-                <YAxis
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  tickFormatter={(v) => inrCompact(v)}
-                  width={80}
-                />
-                <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                {results.computedVehicles.map((v, idx) => (
-                  <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)} />
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
 
           {results.computedVehicles.length > 1 && (
             <div style={{ marginTop: "32px" }}>
