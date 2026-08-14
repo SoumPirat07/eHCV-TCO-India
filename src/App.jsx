@@ -161,6 +161,9 @@ const INITIAL_VEHICLES = [
     type: "diesel",
     purchasePrice: 4000000,
     gstRate: 18,
+    registrationFee: 135000,
+    trailerCost: 1800000,
+    vehicleMiscCost: 0,
     tractorWeight: 8000,
     trailerWeight: 9000,
     gvwr: 55000,
@@ -181,11 +184,11 @@ const INITIAL_VEHICLES = [
     loanTenure: 7,
     driverSalaryMonthly: 45000,
     driversPerVehicle: 2,
-    tollCostPerTrip: 3500,
+    tollCostPerTrip: 7350,
     tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000,
     tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
     tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000,
-    generalUtilizationPct: 40, 
+    driverRestDelayFactorKm: 200, 
     scheduledDowntimeDays: 12,
     unscheduledDowntimeHrs: 48,
     miscCostPerMonth: 10000,
@@ -196,47 +199,50 @@ const INITIAL_VEHICLES = [
     id: "v-bev-1",
     name: "Electric BEV 55T",
     type: "electric",
-    purchasePrice: 10000000,
-    gstRate: 5,
+    purchasePrice: 9000000,
+    gstRate: 0,
+    registrationFee: 135000,
+    trailerCost: 1800000,
+    vehicleMiscCost: 0,
     tractorWeight: 9500,
     trailerWeight: 9000,
     gvwr: 55000,
-    baseUnloadedEconomy: 0.65, 
-    baseLoadedEconomy: 0.35,  
+    baseUnloadedEconomy: 0.6, 
+    baseLoadedEconomy: 0.31,  
     batteryCapacity: 282,
     batteryReplacementCost: 4000000,
-    batteryDegradationPerCycle: 0.004,
+    batteryDegradationPerCycle: 0.0035,
     batterySOHThreshold: 75,
     maintCostPerKm: 2.5,
     insuranceRatePct: 1.5,
-    residualPct: 5,
+    residualPct: 7,
     allowOverloading: false,
     overloadPenaltyPctPerTonne: 2.0,
     financing: "emi",
     downPaymentPct: 20,
     interestRate: 10.0,
-    loanTenure: 10,
+    loanTenure: 7,
     driverSalaryMonthly: 45000,
     driversPerVehicle: 2,
-    tollCostPerTrip: 3500,
+    tollCostPerTrip: 7350,
     tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000,
     tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
     tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000,
     scheduledDowntimeDays: 12,
-    unscheduledDowntimeHrs: 100,
+    unscheduledDowntimeHrs: 48,
     safeSoCThreshold: 10,
-    stationCost: 5000000,
-    stationMaintenance: 120000,
-    chargerCost: 1500000,
-    chargerMaintenance: 50000,
+    stationCost: 7000000,
+    stationMaintenance: 500000,
+    chargerCost: 2250000,
+    chargerMaintenance: 200000,
     infrastructureTaxCredit: 0,
-    chargeSpeedKW: 200, 
-    chargingTimeMarginPct: 25, 
+    chargeSpeedKW: 225, 
+    chargingTimeMarginPct: 10, 
     electricityRate: 5,
-    depotLandLeaseMonthly: 120000,
+    depotLandLeaseMonthly: 250000,
     depotDemandChargesMonthly: 80000,
     useDynamicSOHLimit: true,
-    generalUtilizationPct: 51.9,
+    driverRestDelayFactorKm: 200,
     miscCostPerMonth: 10000,
     miscCostNotes: "Chai/Paani",
     operatorMarginPerTruckMonthly: 25000,
@@ -418,8 +424,8 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
     refuelingDowntimeHrs = refuelingStopsCount * ((v.refuelTimeMins || 20) / 60);
   }
 
-  const safeGenUtil = Math.max(1, Math.min(100, v.generalUtilizationPct || 100));
-  const generalRestDowntimeHrs = (totalTripDrivingHrs / (safeGenUtil / 100)) - totalTripDrivingHrs;
+  const safeDelayFactor = Math.max(1, v.driverRestDelayFactorKm || 200);
+  const generalRestDowntimeHrs = totalTripDistance / safeDelayFactor;
 
   const resolvedSOHReplacementLimit = (v.type === "electric" && v.useDynamicSOHLimit)
     ? Math.min(95, Math.max(v.batterySOHThreshold, criticalSOHLimit))
@@ -437,10 +443,15 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
   const tripsPerYearPerVehicle = fullTurnaroundCycleHrs > 0 ? totalOperatingHoursAvailableYear / fullTurnaroundCycleHrs : 0;
 
   const segmentDemandTripsNeededPerYear = routeSegments.map((seg, idx) => {
-    const demand = seg.monthlyTonnage || 0;
+    const demandMonthly = seg.monthlyTonnage || 0;
     const segPayload = segmentCappedPayloads[idx];
-    if (demand <= 0 || segPayload <= 0) return 0;
-    return (demand * 12) / segPayload;
+    if (demandMonthly <= 0 || segPayload <= 0) return 0;
+    
+    // Convert to Daily Dispatches (Aligning with Excel Rule of thumb)
+    const dailyDemand = demandMonthly / Math.max(1, workingDaysPerMonth);
+    const dailyDispatches = Math.ceil(dailyDemand / segPayload); // Round up to nearest dispatch
+    
+    return dailyDispatches * workingDaysPerMonth * 12;
   });
   const usesSegmentDemand = segmentDemandTripsNeededPerYear.some((x) => x > 0);
   const bottleneckTripsNeededPerYear = Math.max(0, ...segmentDemandTripsNeededPerYear);
@@ -497,7 +508,13 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
     });
   }
 
-  const totalUpfrontGSTPrice = v.purchasePrice * (1 + v.gstRate / 100);
+  // Total on-road vehicle acquisition cost = ex-showroom + GST + registration + trailer + one-time misc.
+  // Registration, trailer and misc are entered per vehicle and are intentionally not GST-adjusted here.
+  const vehicleCostBeforeGSTAddOns = v.purchasePrice * (1 + v.gstRate / 100);
+  const totalUpfrontGSTPrice = vehicleCostBeforeGSTAddOns +
+    (v.registrationFee || 0) +
+    (v.trailerCost || 0) +
+    (v.vehicleMiscCost || 0);
   let loanUpfrontDownpayment = totalUpfrontGSTPrice;
   let loanAnnualEMI = 0;
   let loanPrincipalDebt = 0;
@@ -512,6 +529,13 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
 
   let npvTCOSum = (loanUpfrontDownpayment * fleetSizeRequired) + capitalSetupInfra;
   let cumCostTimeline = [npvTCOSum];
+
+  // Capital deployment summary metrics (per truck & fleet-wide)
+  const totalFleetUpfrontCapex = (loanUpfrontDownpayment * fleetSizeRequired) + capitalSetupInfra;
+  const infraCapexPerTruck = fleetSizeRequired > 0 ? capitalSetupInfra / fleetSizeRequired : 0;
+  const loadedCapexPerTruckOnRoad = totalUpfrontGSTPrice + infraCapexPerTruck;
+  const loadedCapexPerTruckEquity = loanUpfrontDownpayment + infraCapexPerTruck;
+  const totalFleetOnRoadCapex = (totalUpfrontGSTPrice * fleetSizeRequired) + capitalSetupInfra;
 
   const breakdown = { upfront: npvTCOSum, fuelOrEnergy: 0, emi: 0, maintenance: 0, insurance: 0, wages: 0, tolls: 0, tyres: 0, batteryReplacements: 0, infraMaintenance: 0, misc: 0, residuals: 0, operatorMargin: 0 };
 
@@ -720,7 +744,13 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
     loanUpfrontDownpayment,
     loanPrincipalDebt,
     loanAnnualEMI,
-    loanMonthlyEMI: loanAnnualEMI / 12
+    loanMonthlyEMI: loanAnnualEMI / 12,
+    capitalSetupInfra,
+    infraCapexPerTruck,
+    loadedCapexPerTruckOnRoad,
+    loadedCapexPerTruckEquity,
+    totalFleetUpfrontCapex,
+    totalFleetOnRoadCapex
   };
 }
 
@@ -762,17 +792,17 @@ function computeBreakeven(chartData, nameA, nameB) {
 
 export default function ComprehensiveTCOCalculator() {
   const [darkMode, setDarkMode] = useState(true);
-  const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(30);
-  const [loadingUnloadingTimePerTrip, setLoadingUnloadingTimePerTrip] = useState(5);
+  const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(25);
+  const [loadingUnloadingTimePerTrip, setLoadingUnloadingTimePerTrip] = useState(10);
 
   const [analysisPeriod, setAnalysisPeriod] = useState(10);
-  const [discountRate, setDiscountRate] = useState(7);
+  const [discountRate, setDiscountRate] = useState(0);
 
-  const [escGeneral, setEscGeneral] = useState(4.0);
+  const [escGeneral, setEscGeneral] = useState(5.0);
   const [escFuel, setEscFuel] = useState(5.0);
-  const [escElectricity, setEscElectricity] = useState(3.0);
-  const [escWages, setEscWages] = useState(6.0);
-  const [escInfrastructure, setEscInfrastructure] = useState(4.0);
+  const [escElectricity, setEscElectricity] = useState(5.0);
+  const [escWages, setEscWages] = useState(7.0);
+  const [escInfrastructure, setEscInfrastructure] = useState(7.0);
 
   const [routeSegments, setRouteSegments] = useState(DEFAULT_ROUTE.map((s, i) => ({
     ...s, monthlyTonnage: i === 1 ? 0 : 85000
@@ -798,6 +828,9 @@ export default function ComprehensiveTCOCalculator() {
       type: type,
       purchasePrice: type === "diesel" ? 4500000 : 10500000,
       gstRate: type === "diesel" ? 18 : 5,
+      registrationFee: 0,
+      trailerCost: 0,
+      vehicleMiscCost: 0,
       tractorWeight: type === "diesel" ? 8500 : 11500,
       trailerWeight: 9000,
       gvwr: 55000,
@@ -814,7 +847,7 @@ export default function ComprehensiveTCOCalculator() {
       loanTenure: 7,
       driverSalaryMonthly: 35000,
       driversPerVehicle: 1,
-      tollCostPerTrip: 3500,
+      tollCostPerTrip: 7350,
       tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 100000,
       tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 90000,
       tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 80000,
@@ -823,7 +856,7 @@ export default function ComprehensiveTCOCalculator() {
       miscCostPerMonth: 10000,
       miscCostNotes: "Chai/Paani",
       operatorMarginPerTruckMonthly: 25000,
-      generalUtilizationPct: type === "diesel" ? 85 : 65,
+      driverRestDelayFactorKm: 200,
     };
 
     if (type === "diesel") {
@@ -1155,6 +1188,12 @@ export default function ComprehensiveTCOCalculator() {
         .pie-chart-container { display: flex; flex-direction: column; align-items: center; justify-content: center; }
         .pie-legend { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; font-size: 11px; }
         .pie-legend-item { display: flex; align-items: center; gap: 4px; color: var(--text-dim); }
+        .time-split-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 14px; }
+        .time-split-table th { text-align: right; padding: 8px 10px; color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; border-bottom: 2px solid var(--border); }
+        .time-split-table th:first-child { text-align: left; }
+        .time-split-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        .time-split-table td:first-child { text-align: left; }
+        .time-split-table tr.total-row td { border-top: 2px solid var(--border); border-bottom: none; font-weight: 700; }
       `}</style>
 
       {/* Header controls */}
@@ -1425,6 +1464,9 @@ export default function ComprehensiveTCOCalculator() {
                 <div className="section-tag" style={{ marginTop: 0 }}>Base Unit Economics</div>
                 <Field label="Ex-Showroom Price (Ex GST)" value={v.purchasePrice} onChange={(val) => updateVehicleProp(v.id, "purchasePrice", val)} suffix="₹" step={50000} />
                 <Field label="GST Rate" value={v.gstRate} onChange={(val) => updateVehicleProp(v.id, "gstRate", val)} suffix="%" step={1} />
+                <Field label="Registration Fee (per vehicle)" value={v.registrationFee} onChange={(val) => updateVehicleProp(v.id, "registrationFee", val)} suffix="₹" step={5000} />
+                <Field label="Trailer Cost (per vehicle)" value={v.trailerCost} onChange={(val) => updateVehicleProp(v.id, "trailerCost", val)} suffix="₹" step={50000} />
+                <Field label="Misc. Vehicle Cost (one-time)" value={v.vehicleMiscCost} onChange={(val) => updateVehicleProp(v.id, "vehicleMiscCost", val)} suffix="₹" step={5000} />
                 <Field label="Tractor Weight" value={v.tractorWeight} onChange={(val) => updateVehicleProp(v.id, "tractorWeight", val)} suffix="kg" step={100} />
                 <Field label="Trailer Weight" value={v.trailerWeight} onChange={(val) => updateVehicleProp(v.id, "trailerWeight", val)} suffix="kg" step={100} />
                 <Field label="GVWR Limit" value={v.gvwr} onChange={(val) => updateVehicleProp(v.id, "gvwr", val)} suffix="kg" step={500} />
@@ -1511,22 +1553,22 @@ export default function ComprehensiveTCOCalculator() {
                 <TextField label="Expense Notes" value={v.miscCostNotes} onChange={(val) => updateVehicleProp(v.id, "miscCostNotes", val)} placeholder="e.g. permits, parking..." />
 
                 <div className="section-tag">Downtime & Utilization</div>
-                <Field label="General Utilization (driving ÷ driving+rest, excl. charging)" value={v.generalUtilizationPct} onChange={(val) => updateVehicleProp(v.id, "generalUtilizationPct", val)} suffix="%" step={1} min={1} max={100} />
+                <Field label="Driver Rest/Delay Factor" value={v.driverRestDelayFactorKm} onChange={(val) => updateVehicleProp(v.id, "driverRestDelayFactorKm", val)} suffix="km / 1 hr delay" step={10} min={10} />
                 <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginTop: "-8px", marginBottom: "10px" }}>
-                  Governs driver rest / queuing / yard time relative to pure driving time, for BOTH vehicle types. Load/unload time and refuel/charging time are added separately, on top of this.
+                  Calculates driver rest and miscellaneous en-route delays. E.g. 200 means 1 hour of delay added for every 200 km driven.
                 </div>
                 <Field label="Scheduled Service (per vehicle)" value={v.scheduledDowntimeDays} onChange={(val) => updateVehicleProp(v.id, "scheduledDowntimeDays", val)} suffix="Days/Year" step={1} />
                 <Field label="Unscheduled Outages (per vehicle)" value={v.unscheduledDowntimeHrs} onChange={(val) => updateVehicleProp(v.id, "unscheduledDowntimeHrs", val)} suffix="Hours/Year" step={1} />
                 {currentComputed && (
                   <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "-4px", lineHeight: 1.6 }}>
-                    General utilization (input, excl. energy fill): <strong className="num" style={{ color: "var(--text)" }}>{v.generalUtilizationPct}%</strong><br />
+                    Driver Rest / En-route Delay (per loop): <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.generalRestDowntimeHrs.toFixed(2)} hrs</strong><br />
                     {v.type === "electric" && (
                       <>Charging downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.chargingDowntimeHrs.toFixed(2)} hrs</strong><br /></>
                     )}
                     {v.type === "diesel" && (
                       <>Refueling downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.refuelingDowntimeHrs.toFixed(2)} hrs</strong><br /></>
                     )}
-                    Final utilization (driving ÷ full turnaround, incl. load/unload & energy fill): <strong className="num" style={{ color: "var(--bev)" }}>{currentComputed.utilizationPctComputed.toFixed(1)}%</strong>
+                    Final utilization (driving ÷ full turnaround cycle): <strong className="num" style={{ color: "var(--bev)" }}>{currentComputed.utilizationPctComputed.toFixed(1)}%</strong>
                   </div>
                 )}
 
@@ -1632,8 +1674,11 @@ export default function ComprehensiveTCOCalculator() {
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "10px", paddingTop: "8px", borderTop: "1px dashed var(--border)" }}>
                           <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>On-road price (incl. GST)</span>
+                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total vehicle cost (on-road)</span>
                             <span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.totalUpfrontGSTPrice)}</span>
+                          </div>
+                          <div style={{ fontSize: "10.5px", color: "var(--text-dim)", lineHeight: 1.5 }}>
+                            GST + registration + trailer + one-time misc. included
                           </div>
                           <div style={{ display: "flex", justifyContent: "space-between" }}>
                             <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Down payment</span>
@@ -1741,6 +1786,51 @@ export default function ComprehensiveTCOCalculator() {
 
           <div style={{ marginTop: "8px", marginBottom: "24px" }}>
             <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+              <DollarSign size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+              Capital Deployment & Infrastructure Summary
+            </h3>
+            <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px", lineHeight: 1.5 }}>
+              "Loaded Capex/Truck" is the fully-loaded capital cost of putting one truck into service — its own on-road price plus that truck's proportional share of the charging network build-out (stations + chargers, ex-subsidy). For diesel vehicles there's no charging infra, so loaded capex equals the on-road price.
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table className="time-split-table">
+                <thead>
+                  <tr>
+                    <th>Vehicle</th>
+                    <th>Fleet Size</th>
+                    <th>On-Road Price / Truck</th>
+                    <th>Equity (Down Payment) / Truck</th>
+                    <th>Charging Infra Capex (Total)</th>
+                    <th>Infra Capex Allocated / Truck</th>
+                    <th>Loaded Capex / Truck</th>
+                    <th>Total Fleet Upfront Capex (Equity + Infra)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {results.computedVehicles.map((v) => (
+                    <tr key={v.id}>
+                      <td style={{ color: colorForVehicle(v, results.computedVehicles), fontWeight: 600 }}>{v.name}</td>
+                      <td className="num">{v.fleetSizeRequired}</td>
+                      <td className="num">{inr(v.totalUpfrontGSTPrice)}</td>
+                      <td className="num">{inr(v.loanUpfrontDownpayment)}</td>
+                      <td className="num">{v.type === "electric" ? inr(v.capitalSetupInfra) : "—"}</td>
+                      <td className="num">{v.type === "electric" ? inr(v.infraCapexPerTruck) : "—"}</td>
+                      <td className="num" style={{ fontWeight: 700, color: colorForVehicle(v, results.computedVehicles) }}>{inr(v.loadedCapexPerTruckOnRoad)}</td>
+                      <td className="num" style={{ fontWeight: 700 }}>{inrCompact(v.totalFleetUpfrontCapex)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {results.computedVehicles.some(v => v.type === "electric") && (
+              <div style={{ fontSize: "11px", color: "var(--text-dim)", marginTop: "10px", lineHeight: 1.5 }}>
+                Charging infra capex is shared across every EV in that fleet's sizing, so it shrinks per truck as the fleet grows and stations see more utilization. Full-fleet infra spend, station count and total chargers are shown in the "Charger Infrastructure Sizing" section on each EV's profile card and in the "Charging Station Sizing" table below.
+              </div>
+            )}
+          </div>
+
+          <div style={{ marginTop: "8px", marginBottom: "24px" }}>
+            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
               <Route size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
               Cost & Estimated Freight Rate by Segment
             </h3>
@@ -1833,6 +1923,36 @@ export default function ComprehensiveTCOCalculator() {
                  <Bar dataKey="Rest/Queue" stackId="a" fill="#6b7280" />
                </BarChart>
              </ResponsiveContainer>
+
+             <div style={{ overflowX: "auto" }}>
+               <table className="time-split-table">
+                 <thead>
+                   <tr>
+                     <th>Vehicle</th>
+                     <th>Driving</th>
+                     <th>Load/Unload</th>
+                     <th>Refuel / Charge</th>
+                     <th>Rest/Queue</th>
+                     <th>Full Turnaround Cycle</th>
+                   </tr>
+                 </thead>
+                 <tbody>
+                   {results.computedVehicles.map((v) => {
+                     const refuelChargeHrs = v.chargingDowntimeHrs + (v.refuelingDowntimeHrs || 0);
+                     return (
+                       <tr key={v.id}>
+                         <td style={{ color: colorForVehicle(v, results.computedVehicles), fontWeight: 600 }}>{v.name}</td>
+                         <td className="num">{v.drivingHrs.toFixed(2)} hrs</td>
+                         <td className="num">{v.loadUnloadHrs.toFixed(2)} hrs</td>
+                         <td className="num">{refuelChargeHrs.toFixed(2)} hrs</td>
+                         <td className="num">{v.generalRestDowntimeHrs.toFixed(2)} hrs</td>
+                         <td className="num" style={{ fontWeight: 700 }}>{v.turnaroundCycleHrs.toFixed(2)} hrs</td>
+                       </tr>
+                     );
+                   })}
+                 </tbody>
+               </table>
+             </div>
           </div>
 
           <div style={{ marginTop: "32px" }}>
@@ -2289,4 +2409,4 @@ function inrCompact(value) {
   if (abs >= 1e5) return `${sign}₹${(abs / 1e5).toFixed(2)} L`;
   if (abs >= 1e3) return `${sign}₹${(abs / 1e3).toFixed(1)} K`;
   return `${sign}₹${abs.toFixed(0)}`;
-} 
+}
