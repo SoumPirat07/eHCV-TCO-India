@@ -3,7 +3,7 @@ import {
   Truck, Zap, Fuel, BatteryCharging, TrendingUp,
   Package, Info, RotateCcw, PlugZap,
   Plus, Trash2, MapPin, Settings, Sun, Moon, AlertTriangle, CheckCircle2,
-  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon
+  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon, Target, Activity
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -11,11 +11,11 @@ import {
   LabelList, PieChart, Pie, Cell
 } from "recharts";
 
-// 1. Core Lookup Matrix for DIESEL Duty Cycle Efficiency
-const DIESEL_EFFICIENCY_MATRIX = {
+// 1. Default Lookup Matrix for DIESEL Duty Cycle Efficiency
+const DEFAULT_DIESEL_EFFICIENCY_MATRIX = {
   "6 lane highway/Expressway": {
     "High":   { 0: 1.10, 20: 0.90, 40: 0.70, 60: 0.60 },
-    "Medium": { 0: 1.21, 20: 0.97, 40: 0.74, 60: 0.62 }, // BASELINE REFERENCE
+    "Medium": { 0: 1.21, 20: 0.97, 40: 0.74, 60: 0.62 },
     "Low":    { 0: 1.33, 20: 1.05, 40: 0.77, 60: 0.64 }
   },
   "4 lane highway": {
@@ -40,11 +40,11 @@ const DIESEL_EFFICIENCY_MATRIX = {
   }
 };
 
-// 2. Core Lookup Matrix for EV Duty Cycle Efficiency (New Physics Model)
-const EV_EFFICIENCY_MATRIX = {
+// 2. Default Lookup Matrix for EV Duty Cycle Efficiency
+const DEFAULT_EV_EFFICIENCY_MATRIX = {
   "6 lane highway/Expressway": {
     "High":   { 0: 1.35, 20: 1.08, 40: 0.82, 60: 0.69 },
-    "Medium": { 0: 1.21, 20: 0.97, 40: 0.74, 60: 0.62 }, // MATCHING BASELINE REFERENCE
+    "Medium": { 0: 1.21, 20: 0.97, 40: 0.74, 60: 0.62 },
     "Low":    { 0: 1.10, 20: 0.88, 40: 0.68, 60: 0.57 }
   },
   "4 lane highway": {
@@ -69,26 +69,26 @@ const EV_EFFICIENCY_MATRIX = {
   }
 };
 
-const ROAD_TYPES = Object.keys(DIESEL_EFFICIENCY_MATRIX);
+const ROAD_TYPES = ["6 lane highway/Expressway", "4 lane highway", "2 lane state highway", "City road", "Broken road"];
 const TRAFFIC_CONDITIONS = ["High", "Medium", "Low"];
+const PAYLOAD_KEYS = [0, 20, 40, 60];
 
 const PIE_COLORS = ['#38bdf8', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#64748b', '#14b8a6', '#f97316', '#8b5cf6'];
 
-function interpolateEfficiency(roadType, traffic, payload, vehicleType = "diesel") {
-  const activeMatrix = vehicleType === "electric" ? EV_EFFICIENCY_MATRIX : DIESEL_EFFICIENCY_MATRIX;
+function interpolateEfficiency(roadType, traffic, payload, vehicleType, dieselMatrix, evMatrix) {
+  const activeMatrix = vehicleType === "electric" ? evMatrix : dieselMatrix;
   const road = activeMatrix[roadType] || activeMatrix["6 lane highway/Expressway"];
   const cond = road[traffic] || road["Medium"];
-  const keys = [0, 20, 40, 60];
 
   if (payload <= 0) return cond[0];
   if (payload >= 60) return cond[60];
 
   let lowerKey = 0;
   let upperKey = 60;
-  for (let i = 0; i < keys.length - 1; i++) {
-    if (payload >= keys[i] && payload <= keys[i+1]) {
-      lowerKey = keys[i];
-      upperKey = keys[i+1];
+  for (let i = 0; i < PAYLOAD_KEYS.length - 1; i++) {
+    if (payload >= PAYLOAD_KEYS[i] && payload <= PAYLOAD_KEYS[i+1]) {
+      lowerKey = PAYLOAD_KEYS[i];
+      upperKey = PAYLOAD_KEYS[i+1];
       break;
     }
   }
@@ -99,13 +99,13 @@ function interpolateEfficiency(roadType, traffic, payload, vehicleType = "diesel
   return lowerVal + ratio * (upperVal - lowerVal);
 }
 
-function computeWeightedMultiplier(stretches, payload, vehicleType = "diesel") {
+function computeWeightedMultiplier(stretches, payload, vehicleType, dieselMatrix, evMatrix) {
   let weightedMultiplier = 0;
   let sumStretch = 0;
   stretches.forEach((st) => {
     if (st.percentage > 0) {
-      const matrixVal = interpolateEfficiency(st.roadType, st.traffic, payload, vehicleType);
-      const refVal = interpolateEfficiency("6 lane highway/Expressway", "Medium", payload, vehicleType);
+      const matrixVal = interpolateEfficiency(st.roadType, st.traffic, payload, vehicleType, dieselMatrix, evMatrix);
+      const refVal = interpolateEfficiency("6 lane highway/Expressway", "Medium", payload, vehicleType, dieselMatrix, evMatrix);
       const factor = refVal > 0 ? matrixVal / refVal : 1;
       weightedMultiplier += factor * (st.percentage / 100);
       sumStretch += st.percentage;
@@ -156,103 +156,35 @@ function colorForVehicle(v, allVehicles) {
 
 const INITIAL_VEHICLES = [
   {
-    id: "v-diesel-1",
-    name: "Standard Diesel 55T",
-    type: "diesel",
-    purchasePrice: 4000000,
-    gstRate: 18,
-    registrationFee: 135000,
-    trailerCost: 1800000,
-    vehicleMiscCost: 0,
-    tractorWeight: 8000,
-    trailerWeight: 9000,
-    gvwr: 55000,
-    baseUnloadedEconomy: 4, 
-    baseLoadedEconomy: 3, 
-    fuelOrElectricPrice: 96,
-    fuelCapacityLitres: 365,
-    safeFuelThreshold: 5,
-    refuelTimeMins: 20,
-    maintCostPerKm: 2.5,
-    insuranceRatePct: 1.5,
-    residualPct: 10,
-    allowOverloading: false,
-    overloadPenaltyPctPerTonne: 2.0,
-    financing: "emi",
-    downPaymentPct: 20,
-    interestRate: 10,
-    loanTenure: 7,
-    driverSalaryMonthly: 45000,
-    driversPerVehicle: 2,
-    tollCostPerTrip: 7350,
-    tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000,
-    tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
-    tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000,
-    driverRestDelayFactorKm: 200, 
-    scheduledDowntimeDays: 12,
-    unscheduledDowntimeHrs: 48,
-    miscCostPerMonth: 10000,
-    miscCostNotes: "Chai/Paani",
-    operatorMarginPerTruckMonthly: 25000,
+    id: "v-diesel-1", name: "Standard Diesel 55T", type: "diesel", purchasePrice: 4000000, gstRate: 18, registrationFee: 135000,
+    trailerCost: 1800000, vehicleMiscCost: 0, tractorWeight: 8000, trailerWeight: 9000, gvwr: 55000,
+    baseUnloadedEconomy: 4, baseLoadedEconomy: 3, fuelOrElectricPrice: 96, fuelCapacityLitres: 365,
+    safeFuelThreshold: 5, refuelTimeMins: 20, maintCostPerKm: 2.5, insuranceRatePct: 1.5, residualPct: 10,
+    allowOverloading: false, overloadPenaltyPctPerTonne: 2.0, financing: "emi", downPaymentPct: 20,
+    interestRate: 10, loanTenure: 7, driverSalaryMonthly: 45000, driversPerVehicle: 2, tollCostPerTrip: 7350,
+    tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000, tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
+    tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000, driverRestDelayFactorKm: 200,
+    scheduledDowntimeDays: 12, unscheduledDowntimeHrs: 48, miscCostPerMonth: 10000, miscCostNotes: "Chai/Paani", operatorMarginPerTruckMonthly: 25000,
   },
   {
-    id: "v-bev-1",
-    name: "Electric BEV 55T",
-    type: "electric",
-    purchasePrice: 9000000,
-    gstRate: 0,
-    registrationFee: 135000,
-    trailerCost: 1800000,
-    vehicleMiscCost: 0,
-    tractorWeight: 9500,
-    trailerWeight: 9000,
-    gvwr: 55000,
-    baseUnloadedEconomy: 0.6, 
-    baseLoadedEconomy: 0.31,  
-    batteryCapacity: 282,
-    batteryReplacementCost: 4000000,
-    batteryDegradationPerCycle: 0.0035,
-    batterySOHThreshold: 75,
-    maintCostPerKm: 2.5,
-    insuranceRatePct: 1.5,
-    residualPct: 7,
-    allowOverloading: false,
-    overloadPenaltyPctPerTonne: 2.0,
-    financing: "emi",
-    downPaymentPct: 20,
-    interestRate: 10.0,
-    loanTenure: 7,
-    driverSalaryMonthly: 45000,
-    driversPerVehicle: 2,
-    tollCostPerTrip: 7350,
-    tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000,
-    tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
-    tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000,
-    scheduledDowntimeDays: 12,
-    unscheduledDowntimeHrs: 48,
-    safeSoCThreshold: 10,
-    stationCost: 7000000,
-    stationMaintenance: 500000,
-    chargerCost: 2250000,
-    chargerMaintenance: 200000,
-    infrastructureTaxCredit: 0,
-    chargeSpeedKW: 225, 
-    chargingTimeMarginPct: 10, 
-    electricityRate: 5,
-    depotLandLeaseMonthly: 250000,
-    depotDemandChargesMonthly: 80000,
-    useDynamicSOHLimit: true,
-    driverRestDelayFactorKm: 200,
-    miscCostPerMonth: 10000,
-    miscCostNotes: "Chai/Paani",
-    operatorMarginPerTruckMonthly: 25000,
+    id: "v-bev-1", name: "Electric BEV 55T", type: "electric", purchasePrice: 9000000, gstRate: 5, registrationFee: 135000,
+    trailerCost: 1800000, vehicleMiscCost: 0, tractorWeight: 9500, trailerWeight: 9000, gvwr: 55000,
+    baseUnloadedEconomy: 0.6, baseLoadedEconomy: 0.31, batteryCapacity: 282, batteryReplacementCost: 4000000,
+    batteryDegradationPerCycle: 0.0035, batterySOHThreshold: 75, maintCostPerKm: 2.5, insuranceRatePct: 1.5,
+    residualPct: 7, allowOverloading: false, overloadPenaltyPctPerTonne: 2.0, financing: "emi", downPaymentPct: 20,
+    interestRate: 10.0, loanTenure: 7, driverSalaryMonthly: 45000, driversPerVehicle: 2, tollCostPerTrip: 7350,
+    tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000, tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
+    tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000, scheduledDowntimeDays: 12, unscheduledDowntimeHrs: 48,
+    safeSoCThreshold: 10, stationCost: 7000000, stationMaintenance: 500000, chargerCost: 2250000, chargerMaintenance: 200000,
+    infrastructureTaxCredit: 0, chargeSpeedKW: 225, chargingTimeMarginPct: 10, electricityRate: 5, depotLandLeaseMonthly: 250000,
+    depotDemandChargesMonthly: 80000, useDynamicSOHLimit: true, driverRestDelayFactorKm: 200, miscCostPerMonth: 10000, miscCostNotes: "Chai/Paani", operatorMarginPerTruckMonthly: 25000,
   }
 ];
 
 // ---------------------------------------------------------------------------
 // CORE PER-VEHICLE ENGINE
 // ---------------------------------------------------------------------------
-function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides = {}) {
+function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, dieselMatrix, evMatrix) {
   const {
     years, dfRate, escGen, escF, escE, escW, escI,
     workingDaysPerMonth, loadingUnloadingTimePerTrip
@@ -297,7 +229,7 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
       baseEconomy = baseEconomy * Math.max(0.1, penaltyFactor); 
     }
 
-    const segWeightedMultiplier = computeWeightedMultiplier(seg.stretches, cappedPayload, v.type);
+    const segWeightedMultiplier = computeWeightedMultiplier(seg.stretches, cappedPayload, v.type, dieselMatrix, evMatrix);
     const segVehicleEconomy = baseEconomy * segWeightedMultiplier;
 
     segmentEconomies.push(segVehicleEconomy);
@@ -337,25 +269,14 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
       chargingDowntimeHrs += finalChargeTimeHrs;
 
       stopsLog.push({
-        label,
-        km: Math.round(km),
-        socBefore: socBefore.toFixed(1),
-        socAfter: chargeToSoC,
-        isDepot,
-        energyLegConsumed: currentEnergySinceCharge,
-        startSoCWindow: lastChargedFromSoC,
-        chargeTimeHrs: finalChargeTimeHrs
+        label, km: Math.round(km), socBefore: socBefore.toFixed(1), socAfter: chargeToSoC, isDepot,
+        energyLegConsumed: currentEnergySinceCharge, startSoCWindow: lastChargedFromSoC, chargeTimeHrs: finalChargeTimeHrs
       });
 
       const uniqueKey = `${label}_${Math.round(km)}`;
       if (!uniqueChargingStopsMap[uniqueKey]) {
         uniqueChargingStopsMap[uniqueKey] = {
-          key: uniqueKey,
-          label,
-          km: Math.round(km),
-          isDepot,
-          chargesPerLoop: 0,
-          timePerChargeHrs: finalChargeTimeHrs
+          key: uniqueKey, label, km: Math.round(km), isDepot, chargesPerLoop: 0, timePerChargeHrs: finalChargeTimeHrs
         };
       }
       uniqueChargingStopsMap[uniqueKey].chargesPerLoop += 1;
@@ -446,11 +367,8 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
     const demandMonthly = seg.monthlyTonnage || 0;
     const segPayload = segmentCappedPayloads[idx];
     if (demandMonthly <= 0 || segPayload <= 0) return 0;
-    
-    // Convert to Daily Dispatches (Aligning with Excel Rule of thumb)
     const dailyDemand = demandMonthly / Math.max(1, workingDaysPerMonth);
-    const dailyDispatches = Math.ceil(dailyDemand / segPayload); // Round up to nearest dispatch
-    
+    const dailyDispatches = Math.ceil(dailyDemand / segPayload); 
     return dailyDispatches * workingDaysPerMonth * 12;
   });
   const usesSegmentDemand = segmentDemandTripsNeededPerYear.some((x) => x > 0);
@@ -482,39 +400,24 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
 
       const stopOverride = chargingStationOverrides[v.id]?.[key] || {};
       const hasChargerOverride = Number.isFinite(stopOverride.chargers);
-      const chargersSized = hasChargerOverride
-        ? Math.max(1, Math.round(stopOverride.chargers))
-        : autoChargersSized;
-      const displayLabel = typeof stopOverride.name === "string" && stopOverride.name.trim()
-        ? stopOverride.name.trim()
-        : rawStop.label;
+      const chargersSized = hasChargerOverride ? Math.max(1, Math.round(stopOverride.chargers)) : autoChargersSized;
+      const displayLabel = typeof stopOverride.name === "string" && stopOverride.name.trim() ? stopOverride.name.trim() : rawStop.label;
 
       uniqueStationsCount += 1;
       totalChargersNeeded += chargersSized;
 
       uniqueStationsList.push({
-        ...rawStop,
-        label: displayLabel,
-        originalLabel: rawStop.label,
-        chargersSized,
-        autoChargersSized,
-        isManualChargerOverride: hasChargerOverride,
-        isManualNameOverride: displayLabel !== rawStop.label,
-        stationSetupCost: v.stationCost,
-        chargersCostSum: chargersSized * v.chargerCost
+        ...rawStop, label: displayLabel, originalLabel: rawStop.label, chargersSized, autoChargersSized,
+        isManualChargerOverride: hasChargerOverride, isManualNameOverride: displayLabel !== rawStop.label,
+        stationSetupCost: v.stationCost, chargersCostSum: chargersSized * v.chargerCost
       });
 
       capitalSetupInfra += (v.stationCost + (chargersSized * v.chargerCost)) * (1 - v.infrastructureTaxCredit / 100);
     });
   }
 
-  // Total on-road vehicle acquisition cost = ex-showroom + GST + registration + trailer + one-time misc.
-  // Registration, trailer and misc are entered per vehicle and are intentionally not GST-adjusted here.
   const vehicleCostBeforeGSTAddOns = v.purchasePrice * (1 + v.gstRate / 100);
-  const totalUpfrontGSTPrice = vehicleCostBeforeGSTAddOns +
-    (v.registrationFee || 0) +
-    (v.trailerCost || 0) +
-    (v.vehicleMiscCost || 0);
+  const totalUpfrontGSTPrice = vehicleCostBeforeGSTAddOns + (v.registrationFee || 0) + (v.trailerCost || 0) + (v.vehicleMiscCost || 0);
   let loanUpfrontDownpayment = totalUpfrontGSTPrice;
   let loanAnnualEMI = 0;
   let loanPrincipalDebt = 0;
@@ -530,7 +433,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
   let npvTCOSum = (loanUpfrontDownpayment * fleetSizeRequired) + capitalSetupInfra;
   let cumCostTimeline = [npvTCOSum];
 
-  // Capital deployment summary metrics (per truck & fleet-wide)
   const totalFleetUpfrontCapex = (loanUpfrontDownpayment * fleetSizeRequired) + capitalSetupInfra;
   const infraCapexPerTruck = fleetSizeRequired > 0 ? capitalSetupInfra / fleetSizeRequired : 0;
   const loadedCapexPerTruckOnRoad = totalUpfrontGSTPrice + infraCapexPerTruck;
@@ -544,7 +446,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
   let batterySetsReplacedCount = 0;
   let batteryReplacementLog = [];
   let sohTimeline = [];
-
   let npvMarginTarget = 0;
 
   for (let t = 1; t <= years; t++) {
@@ -630,10 +531,8 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
 
   const totalCargoTonneKmFleet = annualTonneKmFleet * years;
   const costPerTonneKm = totalCargoTonneKmFleet > 0 ? npvTCOSum / totalCargoTonneKmFleet : 0;
-
   const requiredRevenueNPV = npvTCOSum + npvMarginTarget;
   const requiredFreightRatePerTonneKm = totalCargoTonneKmFleet > 0 ? requiredRevenueNPV / totalCargoTonneKmFleet : 0;
-  
   const marginMultiplier = npvTCOSum > 0 ? requiredRevenueNPV / npvTCOSum : 1;
 
   const maxTheoreticalRange = v.type === "electric" ? v.batteryCapacity * avgRouteEconomy : (v.type === "diesel" ? v.fuelCapacityLitres * avgRouteEconomy : 0);
@@ -649,7 +548,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
   const totalTripsOverLife = Math.max(1, totalTripsAcrossFleetYear * years);
   const fixedCostPerTrip = fixedCostBucketNPV / totalTripsOverLife;
   
-  // Calculate total loop cost mapping empty miles dynamically
   let totalOperatingCostTrip = 0;
   routeSegments.forEach((seg, idx) => {
       const segEconomy = Math.max(0.01, segmentEconomies[idx]);
@@ -661,9 +559,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
   
   const totalTripCost = totalOperatingCostTrip + fixedCostPerTrip;
   const totalTripRequiredRevenue = totalTripCost * marginMultiplier;
-
-  // By dividing the entire loop cost by the useful Tonne-KMs done in the loop, 
-  // we socialise empty miles appropriately.
   const loopCostPerTonneKm = tonneKmPerTrip > 0 ? totalTripCost / tonneKmPerTrip : 0;
   const loopFreightRatePerTonneKm = tonneKmPerTrip > 0 ? totalTripRequiredRevenue / tonneKmPerTrip : 0;
 
@@ -671,90 +566,41 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides =
 
   const segmentCostPerTonneKm = routeSegments.map((seg, idx) => {
     const cappedPayload = segmentCappedPayloads[idx];
-    
-    // Direct cost attribution for information display (doesn't socialise empty miles)
     const segEconomy = Math.max(0.01, segmentEconomies[idx]);
     const fuelPricePerUnit = v.type === "diesel" ? v.fuelOrElectricPrice : v.electricityRate;
     const fuelCostPerKm = fuelPricePerUnit / segEconomy;
     const operatingCostPerKm = fuelCostPerKm + v.maintCostPerKm + tyreCostPerKmFlat;
     
-    // Socialised Rates
     const costPerTonneKmSeg = cappedPayload > 0 ? loopCostPerTonneKm : null;
     const freightRatePerTonneKmSeg = cappedPayload > 0 ? loopFreightRatePerTonneKm : null;
-    
     const costPerTonneSeg = cappedPayload > 0 ? loopCostPerTonneKm * seg.distance : null;
     const freightRatePerTonneSeg = cappedPayload > 0 ? loopFreightRatePerTonneKm * seg.distance : null;
     
     if (freightRatePerTonneSeg) {
-        // Technically loop Rs/Ton isn't straight addition if payloads are different per segment.
-        // But for identical payload loops, it is correct.
         totalFreightRatePerTonneTrip += freightRatePerTonneSeg;
     }
 
     return {
       from: seg.from, to: seg.to, distance: seg.distance, payload: cappedPayload,
-      operatingCostPerKm, costPerTonneKmSeg, freightRatePerTonneKmSeg,
-      costPerTonneSeg, freightRatePerTonneSeg
+      operatingCostPerKm, costPerTonneKmSeg, freightRatePerTonneKmSeg, costPerTonneSeg, freightRatePerTonneSeg
     };
   });
 
   return {
-    ...v,
-    payloadCap,
-    avgRouteEconomy,
-    chargingStopsCount,
-    chargingDowntimeHrs,
-    refuelingDowntimeHrs,
-    refuelingStopsCount,
-    generalRestDowntimeHrs,
-    drivingHrs: totalTripDrivingHrs,
-    loadUnloadHrs: loadingUnloadingTimePerTrip,
-    utilizationPctComputed,
-    stopsLog,
-    uniqueStationsList,
-    turnaroundCycleHrs: fullTurnaroundCycleHrs,
-    fleetSizeRequired,
-    usesSegmentDemand,
-    tripsPerYearPerVehicle,
-    totalTripsAcrossFleetYear,
-    totalDistanceAcrossFleetYear,
-    tonneKmPerTrip,
-    annualTonneKmFleet,
-    totalChargersNeeded,
-    uniqueStationsCount,
-    npvTCOSum,
-    cumCostTimeline,
-    breakdown,
-    costPerTonneKm,
-    requiredFreightRatePerTonneKm,
-    segmentCostPerTonneKm,
-    totalFreightRatePerTonneTrip,
-    currentSOH,
-    criticalSOHLimit,
-    resolvedSOHReplacementLimit,
-    batterySetsReplacedCount,
-    batteryReplacementLog,
-    sohTimeline,
-    segmentOverloads,
-    maxTheoreticalRange,
-    operationalRangeAtStart,
-    operationalRangeAtSOHLimit,
-    replacementsPerVehicle: batteryReplacementLog.length,
-    totalUpfrontGSTPrice,
-    loanUpfrontDownpayment,
-    loanPrincipalDebt,
-    loanAnnualEMI,
-    loanMonthlyEMI: loanAnnualEMI / 12,
-    capitalSetupInfra,
-    infraCapexPerTruck,
-    loadedCapexPerTruckOnRoad,
-    loadedCapexPerTruckEquity,
-    totalFleetUpfrontCapex,
-    totalFleetOnRoadCapex
+    ...v, payloadCap, avgRouteEconomy, chargingStopsCount, chargingDowntimeHrs, refuelingDowntimeHrs,
+    refuelingStopsCount, generalRestDowntimeHrs, drivingHrs: totalTripDrivingHrs, loadUnloadHrs: loadingUnloadingTimePerTrip,
+    utilizationPctComputed, stopsLog, uniqueStationsList, turnaroundCycleHrs: fullTurnaroundCycleHrs,
+    fleetSizeRequired, usesSegmentDemand, tripsPerYearPerVehicle, totalTripsAcrossFleetYear, totalDistanceAcrossFleetYear,
+    tonneKmPerTrip, annualTonneKmFleet, totalChargersNeeded, uniqueStationsCount, npvTCOSum, cumCostTimeline, breakdown,
+    costPerTonneKm, requiredFreightRatePerTonneKm, segmentCostPerTonneKm, totalFreightRatePerTonneTrip, currentSOH,
+    criticalSOHLimit, resolvedSOHReplacementLimit, batterySetsReplacedCount, batteryReplacementLog, sohTimeline,
+    segmentOverloads, maxTheoreticalRange, operationalRangeAtStart, operationalRangeAtSOHLimit, replacementsPerVehicle: batteryReplacementLog.length,
+    totalUpfrontGSTPrice, loanUpfrontDownpayment, loanPrincipalDebt, loanAnnualEMI, loanMonthlyEMI: loanAnnualEMI / 12,
+    capitalSetupInfra, infraCapexPerTruck, loadedCapexPerTruckOnRoad, loadedCapexPerTruckEquity, totalFleetUpfrontCapex, totalFleetOnRoadCapex
   };
 }
 
-function findOptimalChargingNetwork(v, routeSegments, cfg, chargingStationOverrides = {}) {
+function findOptimalChargingNetwork(v, routeSegments, cfg, chargingStationOverrides, dieselMatrix, evMatrix) {
   const n = routeSegments.length;
   if (v.type !== "electric" || n === 0 || n > 12) return null;
 
@@ -762,14 +608,11 @@ function findOptimalChargingNetwork(v, routeSegments, cfg, chargingStationOverri
   const totalCombos = 1 << n;
   for (let mask = 0; mask < totalCombos; mask++) {
     const candidateSegments = routeSegments.map((s, i) => ({ ...s, hasDepotAtTo: !!(mask & (1 << i)) }));
-    const metrics = computeVehicleMetrics(v, candidateSegments, cfg, chargingStationOverrides);
+    const metrics = computeVehicleMetrics(v, candidateSegments, cfg, chargingStationOverrides, dieselMatrix, evMatrix);
     if (!best || metrics.npvTCOSum < best.npvTCOSum) {
       best = {
-        npvTCOSum: metrics.npvTCOSum,
-        depotFlags: candidateSegments.map((s) => s.hasDepotAtTo),
-        uniqueStationsCount: metrics.uniqueStationsCount,
-        totalChargersNeeded: metrics.totalChargersNeeded,
-        chargingStopsCount: metrics.chargingStopsCount
+        npvTCOSum: metrics.npvTCOSum, depotFlags: candidateSegments.map((s) => s.hasDepotAtTo),
+        uniqueStationsCount: metrics.uniqueStationsCount, totalChargersNeeded: metrics.totalChargersNeeded, chargingStopsCount: metrics.chargingStopsCount
       };
     }
   }
@@ -792,9 +635,18 @@ function computeBreakeven(chartData, nameA, nameB) {
 
 export default function ComprehensiveTCOCalculator() {
   const [darkMode, setDarkMode] = useState(true);
+  
+  // Navigation State
+  const [activeTab, setActiveTab] = useState('settings');
+  const [activeResultTab, setActiveResultTab] = useState('kpi');
+  
+  // Matrices State
+  const [dieselMatrix, setDieselMatrix] = useState(DEFAULT_DIESEL_EFFICIENCY_MATRIX);
+  const [evMatrix, setEvMatrix] = useState(DEFAULT_EV_EFFICIENCY_MATRIX);
+  const [matrixEditMode, setMatrixEditMode] = useState('diesel');
+
   const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(25);
   const [loadingUnloadingTimePerTrip, setLoadingUnloadingTimePerTrip] = useState(10);
-
   const [analysisPeriod, setAnalysisPeriod] = useState(10);
   const [discountRate, setDiscountRate] = useState(0);
 
@@ -809,82 +661,60 @@ export default function ComprehensiveTCOCalculator() {
   })));
   const [expandedSegmentId, setExpandedSegmentId] = useState(null);
   const [vehicles, setVehicles] = useState(INITIAL_VEHICLES);
-  
   const [payloadModes, setPayloadModes] = useState({});
-
-  // Manual charging-station overrides are stored per EV and per generated stop.
-  // Example: { "v-bev-1": { "Terminal Depot (B)_500": { name: "B Hub", chargers: 4 } } }
   const [chargingStationOverrides, setChargingStationOverrides] = useState({});
 
   const [optimizerResults, setOptimizerResults] = useState({});
   const [optimizerRunning, setOptimizerRunning] = useState(null);
   const [payloadWarnings, setPayloadWarnings] = useState({});
 
+  const updateMatrixValue = (type, road, traffic, payloadKey, val) => {
+    if (type === 'diesel') {
+      setDieselMatrix(prev => ({
+        ...prev,
+        [road]: { ...prev[road], [traffic]: { ...prev[road][traffic], [payloadKey]: val } }
+      }));
+    } else {
+      setEvMatrix(prev => ({
+        ...prev,
+        [road]: { ...prev[road], [traffic]: { ...prev[road][traffic], [payloadKey]: val } }
+      }));
+    }
+  };
+
+  const resetMatrices = () => {
+    setDieselMatrix(DEFAULT_DIESEL_EFFICIENCY_MATRIX);
+    setEvMatrix(DEFAULT_EV_EFFICIENCY_MATRIX);
+  };
+
   const handleAddVehicle = (type) => {
     const nextId = `v-custom-${Date.now()}`;
     const baseDefault = {
-      id: nextId,
-      name: `${type.toUpperCase()} Custom ${vehicles.length + 1}`,
-      type: type,
-      purchasePrice: type === "diesel" ? 4500000 : 10500000,
-      gstRate: type === "diesel" ? 18 : 5,
-      registrationFee: 0,
-      trailerCost: 0,
-      vehicleMiscCost: 0,
-      tractorWeight: type === "diesel" ? 8500 : 11500,
-      trailerWeight: 9000,
-      gvwr: 55000,
-      baseUnloadedEconomy: type === "diesel" ? 5.0 : 1.3,
-      baseLoadedEconomy: type === "diesel" ? 3.2 : 0.75,
-      maintCostPerKm: type === "diesel" ? 3.6 : 2.4,
-      insuranceRatePct: 2.5,
-      residualPct: type === "diesel" ? 12 : 10,
-      allowOverloading: false,
-      overloadPenaltyPctPerTonne: 2.0,
-      financing: "emi",
-      downPaymentPct: 15,
-      interestRate: 9.5,
-      loanTenure: 7,
-      driverSalaryMonthly: 35000,
-      driversPerVehicle: 1,
-      tollCostPerTrip: 7350,
-      tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 100000,
-      tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 90000,
-      tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 80000,
-      scheduledDowntimeDays: 12,
-      unscheduledDowntimeHrs: 120,
-      miscCostPerMonth: 10000,
-      miscCostNotes: "Chai/Paani",
-      operatorMarginPerTruckMonthly: 25000,
-      driverRestDelayFactorKm: 200,
+      id: nextId, name: `${type.toUpperCase()} Custom ${vehicles.length + 1}`, type: type,
+      purchasePrice: type === "diesel" ? 4500000 : 10500000, gstRate: type === "diesel" ? 18 : 5,
+      registrationFee: 0, trailerCost: 0, vehicleMiscCost: 0, tractorWeight: type === "diesel" ? 8500 : 11500,
+      trailerWeight: 9000, gvwr: 55000, baseUnloadedEconomy: type === "diesel" ? 5.0 : 1.3,
+      baseLoadedEconomy: type === "diesel" ? 3.2 : 0.75, maintCostPerKm: type === "diesel" ? 3.6 : 2.4,
+      insuranceRatePct: 2.5, residualPct: type === "diesel" ? 12 : 10, allowOverloading: false, overloadPenaltyPctPerTonne: 2.0,
+      financing: "emi", downPaymentPct: 15, interestRate: 9.5, loanTenure: 7, driverSalaryMonthly: 35000, driversPerVehicle: 1,
+      tollCostPerTrip: 7350, tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 100000, tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 90000,
+      tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 80000, scheduledDowntimeDays: 12, unscheduledDowntimeHrs: 120,
+      miscCostPerMonth: 10000, miscCostNotes: "Chai/Paani", operatorMarginPerTruckMonthly: 25000, driverRestDelayFactorKm: 200,
     };
 
     if (type === "diesel") {
-      baseDefault.fuelOrElectricPrice = 94;
-      baseDefault.fuelCapacityLitres = 400;
-      baseDefault.safeFuelThreshold = 15;
-      baseDefault.refuelTimeMins = 20;
+      baseDefault.fuelOrElectricPrice = 94; baseDefault.fuelCapacityLitres = 400;
+      baseDefault.safeFuelThreshold = 15; baseDefault.refuelTimeMins = 20;
     } else {
-      baseDefault.batteryCapacity = 500;
-      baseDefault.batteryReplacementCost = 3800000;
-      baseDefault.batteryDegradationPerCycle = 0.006;
-      baseDefault.batterySOHThreshold = 75;
-      baseDefault.safeSoCThreshold = 20;
-      baseDefault.stationCost = 3500000;
-      baseDefault.stationMaintenance = 120000;
-      baseDefault.chargerCost = 1500000;
-      baseDefault.chargerMaintenance = 50000;
-      baseDefault.infrastructureTaxCredit = 5;
-      baseDefault.chargeSpeedKW = 150;
-      baseDefault.chargingTimeMarginPct = 200;
-      baseDefault.electricityRate = 8.5;
-      baseDefault.depotLandLeaseMonthly = 120000;
-      baseDefault.depotDemandChargesMonthly = 80000;
-      baseDefault.useDynamicSOHLimit = true;
+      baseDefault.batteryCapacity = 500; baseDefault.batteryReplacementCost = 3800000;
+      baseDefault.batteryDegradationPerCycle = 0.006; baseDefault.batterySOHThreshold = 75;
+      baseDefault.safeSoCThreshold = 20; baseDefault.stationCost = 3500000; baseDefault.stationMaintenance = 120000;
+      baseDefault.chargerCost = 1500000; baseDefault.chargerMaintenance = 50000; baseDefault.infrastructureTaxCredit = 5;
+      baseDefault.chargeSpeedKW = 150; baseDefault.chargingTimeMarginPct = 200; baseDefault.electricityRate = 8.5;
+      baseDefault.depotLandLeaseMonthly = 120000; baseDefault.depotDemandChargesMonthly = 80000; baseDefault.useDynamicSOHLimit = true;
     }
 
     setVehicles([...vehicles, baseDefault]);
-
     const newCap = getPayloadCap(baseDefault);
     const sameTypeSibling = vehicles.find((vv) => vv.type === type);
     setRouteSegments(routeSegments.map((seg) => {
@@ -921,15 +751,8 @@ export default function ComprehensiveTCOCalculator() {
     const payloadByVehicle = {};
     vehicles.forEach((v) => { payloadByVehicle[v.id] = Math.round(getPayloadCap(v) * 0.85 * 10) / 10; });
     const newSeg = {
-      id: `s-${Date.now()}`,
-      from: `Point ${nextChar}`,
-      to: `Point ${nextCharTo}`,
-      distance: 120,
-      avgSpeed: 55,
-      stretches: generateDefaultStretches(),
-      hasDepotAtTo: false,
-      monthlyTonnage: 0,
-      payloadByVehicle
+      id: `s-${Date.now()}`, from: `Point ${nextChar}`, to: `Point ${nextCharTo}`, distance: 120,
+      avgSpeed: 55, stretches: generateDefaultStretches(), hasDepotAtTo: false, monthlyTonnage: 0, payloadByVehicle
     };
     setRouteSegments([...routeSegments, newSeg]);
   };
@@ -939,16 +762,11 @@ export default function ComprehensiveTCOCalculator() {
     setRouteSegments(routeSegments.filter((s) => s.id !== id));
   };
 
-  const updateSegmentProp = (segId, prop, val) => {
-    setRouteSegments(routeSegments.map((s) => (s.id === segId ? { ...s, [prop]: val } : s)));
-  };
+  const updateSegmentProp = (segId, prop, val) => setRouteSegments(routeSegments.map((s) => (s.id === segId ? { ...s, [prop]: val } : s)));
 
   const updateSegmentVehiclePayload = (segId, vehicleId, rawVal, cap, allowOverload) => {
     const clamped = allowOverload ? Math.max(0, rawVal) : Math.max(0, Math.min(rawVal, cap));
-    setRouteSegments(routeSegments.map((s) => (
-      s.id === segId ? { ...s, payloadByVehicle: { ...s.payloadByVehicle, [vehicleId]: clamped } } : s
-    )));
-    
+    setRouteSegments(routeSegments.map((s) => (s.id === segId ? { ...s, payloadByVehicle: { ...s.payloadByVehicle, [vehicleId]: clamped } } : s)));
     const warnKey = `${segId}_${vehicleId}`;
     if (rawVal > cap && !allowOverload) {
       setPayloadWarnings((prev) => ({ ...prev, [warnKey]: true }));
@@ -974,14 +792,7 @@ export default function ComprehensiveTCOCalculator() {
 
   const updateChargingStationOverride = (vehicleId, stopKey, prop, value) => {
     setChargingStationOverrides((prev) => ({
-      ...prev,
-      [vehicleId]: {
-        ...(prev[vehicleId] || {}),
-        [stopKey]: {
-          ...(prev[vehicleId]?.[stopKey] || {}),
-          [prop]: value
-        }
-      }
+      ...prev, [vehicleId]: { ...(prev[vehicleId] || {}), [stopKey]: { ...(prev[vehicleId]?.[stopKey] || {}), [prop]: value } }
     }));
   };
 
@@ -989,12 +800,10 @@ export default function ComprehensiveTCOCalculator() {
     setChargingStationOverrides((prev) => {
       const vehicleOverrides = { ...(prev[vehicleId] || {}) };
       delete vehicleOverrides[stopKey];
-
       if (Object.keys(vehicleOverrides).length === 0) {
         const { [vehicleId]: _removed, ...rest } = prev;
         return rest;
       }
-
       return { ...prev, [vehicleId]: vehicleOverrides };
     });
   };
@@ -1007,7 +816,7 @@ export default function ComprehensiveTCOCalculator() {
       workingDaysPerMonth, loadingUnloadingTimePerTrip
     };
 
-    const computedVehicles = vehicles.map((v) => computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides));
+    const computedVehicles = vehicles.map((v) => computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, dieselMatrix, evMatrix));
 
     const chartData = [{ year: 0 }];
     computedVehicles.forEach((v) => { chartData[0][v.name] = v.cumCostTimeline[0]; });
@@ -1020,9 +829,7 @@ export default function ComprehensiveTCOCalculator() {
 
     const firstDiesel = computedVehicles.find((v) => v.type === "diesel");
     const firstElectric = computedVehicles.find((v) => v.type === "electric");
-    const breakevenYear = (firstDiesel && firstElectric)
-      ? computeBreakeven(chartData, firstDiesel.name, firstElectric.name)
-      : null;
+    const breakevenYear = (firstDiesel && firstElectric) ? computeBreakeven(chartData, firstDiesel.name, firstElectric.name) : null;
 
     const radarDims = [
       { key: "npvTCOSum", label: "Lower TCO", inverse: true },
@@ -1053,22 +860,19 @@ export default function ComprehensiveTCOCalculator() {
     const timeUtilizationData = computedVehicles.map(v => {
       const total = v.turnaroundCycleHrs;
       return {
-        name: v.name,
-        "Driving": (v.drivingHrs / total) * 100,
-        "Load/Unload": (v.loadUnloadHrs / total) * 100,
-        "Refuel / Charge": ((v.chargingDowntimeHrs + (v.refuelingDowntimeHrs || 0)) / total) * 100,
-        "Rest/Queue": (v.generalRestDowntimeHrs / total) * 100,
+        name: v.name, "Driving": (v.drivingHrs / total) * 100, "Load/Unload": (v.loadUnloadHrs / total) * 100,
+        "Refuel / Charge": ((v.chargingDowntimeHrs + (v.refuelingDowntimeHrs || 0)) / total) * 100, "Rest/Queue": (v.generalRestDowntimeHrs / total) * 100,
       };
     });
 
     return { years, computedVehicles, chartData, cfg, firstDiesel, firstElectric, breakevenYear, radarData, segmentFreightData, timeUtilizationData };
-  }, [ vehicles, routeSegments, chargingStationOverrides, workingDaysPerMonth, loadingUnloadingTimePerTrip, analysisPeriod, discountRate, escGeneral, escFuel, escElectricity, escWages, escInfrastructure ]);
+  }, [ vehicles, routeSegments, chargingStationOverrides, workingDaysPerMonth, loadingUnloadingTimePerTrip, analysisPeriod, discountRate, escGeneral, escFuel, escElectricity, escWages, escInfrastructure, dieselMatrix, evMatrix ]);
 
   const handleRunOptimizer = (vehicleId) => {
     const v = vehicles.find((vv) => vv.id === vehicleId);
     if (!v) return;
     setOptimizerRunning(vehicleId);
-    const best = findOptimalChargingNetwork(v, routeSegments, results.cfg, chargingStationOverrides);
+    const best = findOptimalChargingNetwork(v, routeSegments, results.cfg, chargingStationOverrides, dieselMatrix, evMatrix);
     setOptimizerResults((prev) => ({ ...prev, [vehicleId]: best }));
     setOptimizerRunning(null);
   };
@@ -1083,23 +887,34 @@ export default function ComprehensiveTCOCalculator() {
     const { x, y, width, payload, dataKey } = props;
     const baselineKey = results.computedVehicles[0]?.name;
     if (!payload || !baselineKey || dataKey === baselineKey) return null;
-    
     const baseValue = payload[baselineKey];
     const currentValue = payload[dataKey];
     if (!baseValue || !currentValue) return null;
-
     const diff = (currentValue - baseValue) / baseValue;
     if (Math.abs(diff) < 0.01) return null;
-    
     const isUp = diff > 0;
     const color = isUp ? "var(--bad)" : "var(--good)";
-
     return (
       <text x={x + width / 2} y={y - 6} fill={color} fontSize="11" textAnchor="middle" fontWeight="bold">
         {isUp ? "↑" : "↓"} {Math.abs(diff * 100).toFixed(0)}%
       </text>
     );
   };
+
+  const TABS = [
+    { id: 'settings', label: '1. General Settings', icon: <Settings size={16} /> },
+    { id: 'vehicles', label: '2. Vehicle Profiles', icon: <Truck size={16} /> },
+    { id: 'route', label: '3. Route Planner', icon: <MapPin size={16} /> },
+    { id: 'matrices', label: '4. Efficiency Matrices', icon: <Activity size={16} /> },
+    { id: 'results', label: '5. Analytics Dashboard', icon: <TrendingUp size={16} /> }
+  ];
+
+  const RESULT_TABS = [
+    { id: 'kpi', label: 'Summary & KPIs', icon: <Target size={14} /> },
+    { id: 'segment', label: 'Unit Economics', icon: <Route size={14} /> },
+    { id: 'timeline', label: 'Timeline & Breakdown', icon: <BarChart3 size={14} /> },
+    { id: 'battery', label: 'EV Infrastructure', icon: <Zap size={14} /> }
+  ];
 
   return (
     <div className={`wrap ${darkMode ? "dark-theme" : "light-theme"}`}>
@@ -1110,26 +925,47 @@ export default function ComprehensiveTCOCalculator() {
           --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
           --shadow-glow: 0 0 15px rgba(33, 196, 175, 0.15);
           background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif;
-          padding: 24px; border-radius: 12px; min-height: 100vh; max-width: 1400px; margin: 0 auto; box-sizing: border-box;
+          width: 100%; max-width: 1400px; min-height: 100vh; margin: 0 auto; padding: 24px;
+          border-radius: 12px; box-sizing: border-box; text-align: left; overflow-x: hidden;
           transition: all 0.2s ease-in-out; -webkit-font-smoothing: antialiased;
         }
+        html { overflow-y: scroll; }
+        body { margin: 0; }
         .wrap * { box-sizing: border-box; }
         .wrap, .wrap * { color: var(--text); }
+        .wrap .panel { width: 100%; min-width: 0; overflow: hidden; }
+        .wrap .anim-fade { width: 100%; min-width: 0; text-align: left; }
+        .wrap .anim-fade > * { min-width: 0; }
+        .wrap table { max-width: 100%; }
+        .wrap .route-table { min-width: 1120px; }
+        .wrap .sub-tabs { align-items: center; }
         .wrap.dark-theme { --bg: #090b0c; --panel: #131719; --panel-alt: #1a2022; --border: #262f32; --text: #f3f4f6; --text-dim: #9ca3af; --bev: #21bfa9; --diesel: #e29532; --good: #10b981; --bad: #ef4444; --input-bg: #0d0f10; }
         .wrap.light-theme { --bg: #f9fafb; --panel: #ffffff; --panel-alt: #f3f4f6; --border: #e5e7eb; --text: #111827; --text-dim: #6b7280; --bev: #129382; --diesel: #be7a21; --good: #059669; --bad: #dc2626; --input-bg: #f9fafb; }
         h1, h2, h3, .display { font-family: 'Barlow Condensed', sans-serif; letter-spacing: 0.02em; }
         .num { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1.5px solid var(--border); padding-bottom: 16px; flex-wrap: wrap; gap: 16px; }
         .header h1 { font-size: 26px; font-weight: 700; margin: 0; text-transform: uppercase; }
+        
+        .tabs { display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 2px solid var(--border); padding-bottom: 0px; overflow-x: auto; scrollbar-width: none; }
+        .tabs::-webkit-scrollbar { display: none; }
+        .tab { display: flex; align-items: center; gap: 6px; background: transparent; border: 2px solid transparent; border-bottom: none; padding: 12px 20px; color: var(--text-dim); cursor: pointer; font-size: 14px; font-weight: 600; border-radius: 8px 8px 0 0; transition: all 0.2s; white-space: nowrap; margin-bottom: -2px; }
+        .tab:hover { color: var(--text); background: var(--panel-alt); }
+        .tab.active { background: var(--panel); color: var(--bev); border-color: var(--border); border-bottom-color: var(--panel); box-shadow: 0 -2px 0 var(--bev) inset; }
+        
+        .sub-tabs { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+        .sub-tab { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 20px; border: 1px solid var(--border); background: var(--panel-alt); color: var(--text-dim); cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s; }
+        .sub-tab:hover { border-color: var(--bev); color: var(--text); }
+        .sub-tab.active { background: var(--bev); color: #0c0e0f; border-color: var(--bev); }
+        
         .theme-btn, .reset-btn, .add-btn { display: flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; box-shadow: var(--shadow-sm); transition: all 0.15s ease-in-out; }
         .theme-btn:hover, .reset-btn:hover, .add-btn:hover { border-color: var(--bev); background: var(--panel-alt); }
         .theme-btn:disabled, .add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: var(--shadow-md); margin-bottom: 24px; }
+        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: var(--shadow-md); margin-bottom: 24px; animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
         .panel h2 { font-size: 18px; margin: 0 0 20px; text-transform: uppercase; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
-        .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
         .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
         .grid-auto-fit { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
-        @media(max-width: 900px) { .grid-3, .grid-2 { grid-template-columns: 1fr; } }
+        @media(max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
         .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
         .field-label { font-size: 13px; color: var(--text-dim); flex: 1; }
         .field-input { display: flex; align-items: center; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color 0.15s ease-in-out; }
@@ -1140,7 +976,7 @@ export default function ComprehensiveTCOCalculator() {
         .compact-input { background: var(--input-bg); border: 1px solid var(--border); color: var(--text); padding: 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; text-align: right; width: 100%; transition: 0.15s; }
         .compact-input:focus { border-color: var(--bev); outline: none; }
         .route-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-        .route-table th { background: var(--panel-alt); padding: 12px; color: var(--text-dim); border-bottom: 2px solid var(--border); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; }
+        .route-table th { background: var(--panel-alt); padding: 12px; color: var(--text-dim); border-bottom: 2px solid var(--border); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; white-space: nowrap; }
         .route-table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
         .route-table input, .route-table select { background: var(--input-bg); border: 1px solid var(--border); color: var(--text); padding: 8px; border-radius: 6px; font-size: 13px; }
         .route-table input[type="text"] { width: 100%; }
@@ -1213,18 +1049,53 @@ export default function ComprehensiveTCOCalculator() {
             setRouteSegments(DEFAULT_ROUTE.map((s, i) => ({ ...s, monthlyTonnage: i === 1 ? 0 : 85000 })));
             setVehicles(INITIAL_VEHICLES);
             setOptimizerResults({});
+            resetMatrices();
           }}>
             <RotateCcw size={15} /> Reset
           </button>
         </div>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+      {/* Primary Tab Navigation */}
+      <div className="tabs">
+        {TABS.map(tab => (
+          <button 
+            key={tab.id} 
+            className={`tab ${activeTab === tab.id ? 'active' : ''}`} 
+            onClick={() => setActiveTab(tab.id)}
+          >
+            {tab.icon} {tab.label}
+          </button>
+        ))}
+      </div>
 
-        {/* SECTION 1: Consolidated General Analysis Settings */}
+      {/* Global Safety Warnings (always visible below tabs if present) */}
+      {results.computedVehicles.some(v => v.segmentOverloads.length > 0) && (
+        <div className="alert-strip">
+          <AlertTriangle size={20} style={{ flexShrink: 0, color: "var(--bad)" }} />
+          <div>
+            <strong style={{ display: "block", marginBottom: "4px", fontSize: "14px" }}>Payload Sizing Violations Detected!</strong>
+            The cargo payload configured for some route segments exceeds the maximum carrying capacity of your vehicles.
+            <div style={{ marginTop: "8px", display: "flex", flexDirection: "column", gap: "4px" }}>
+              {results.computedVehicles.map(v => {
+                if (v.segmentOverloads.length === 0) return null;
+                return (
+                  <div key={v.id} style={{ fontSize: "12px", color: "var(--text-dim)" }}>
+                    · <strong>{v.name}</strong> payload capacity is capped at <strong>{v.payloadCap.toFixed(1)}T</strong> (Segment cargo limits scaled down internally). 
+                    <em style={{display: 'block', marginTop: 2, color: 'var(--text-dim)'}}>Enable "Allow Overloading" in the vehicle profile to override this constraint.</em>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SECTION 1: Settings */}
+      {activeTab === 'settings' && (
         <div className="panel">
-          <h2><Settings size={18} color="var(--bev)" /> 1. General Analysis Settings</h2>
-          <div className="grid-3">
+          <h2><Settings size={18} color="var(--bev)" /> 1. General Settings</h2>
+          <div className="grid-2">
             <div>
               <div className="section-tag" style={{ marginTop: 0 }}>Logistics & Timeline</div>
               <Field label="Operational Working Days" value={workingDaysPerMonth} onChange={setWorkingDaysPerMonth} suffix="Days/Month" step={1} />
@@ -1240,201 +1111,21 @@ export default function ComprehensiveTCOCalculator() {
               <Field label="Wages Inflation" value={escWages} onChange={setEscWages} suffix="%" step={0.5} />
               <Field label="Depot Leases Inflation" value={escInfrastructure} onChange={setEscInfrastructure} suffix="%" step={0.5} />
             </div>
-            <div>
-              {/* Empty third column for layout balance */}
-            </div>
           </div>
         </div>
+      )}
 
-        {/* SECTION 2: Route Planner */}
+      {/* SECTION 2: Vehicles */}
+      {activeTab === 'vehicles' && (
         <div className="panel">
-          <h2><MapPin size={18} color="var(--bev)" /> 2. Route Planner & Charging Network</h2>
-
-          <div style={{ overflowX: "auto" }}>
-            <table className="route-table">
-              <thead>
-                <tr>
-                  <th>From Node</th>
-                  <th>To Node</th>
-                  <th>Distance (km)</th>
-                  <th>Monthly Tonnage Demand</th>
-                  <th>Payload (per vehicle)</th>
-                  <th>Avg Speed (km/h)</th>
-                  <th style={{ textAlign: "center" }}>Depot Charger at Target?</th>
-                  <th>Custom Duty Cycle</th>
-                  <th style={{ width: "40px" }}></th>
-                </tr>
-              </thead>
-              <tbody>
-                {routeSegments.map((seg) => {
-                  const activeStretchesSum = seg.stretches.reduce((sum, st) => sum + st.percentage, 0);
-                  return (
-                    <React.Fragment key={seg.id}>
-                      <tr>
-                        <td><input type="text" value={seg.from} onChange={(e) => updateSegmentProp(seg.id, "from", e.target.value)} /></td>
-                        <td><input type="text" value={seg.to} onChange={(e) => updateSegmentProp(seg.id, "to", e.target.value)} /></td>
-                        <td><input type="number" value={seg.distance} onChange={(e) => updateSegmentProp(seg.id, "distance", parseFloat(e.target.value) || 0)} /></td>
-                        <td>
-                          <input type="number" value={seg.monthlyTonnage || 0} step={100} onChange={(e) => updateSegmentProp(seg.id, "monthlyTonnage", parseFloat(e.target.value) || 0)} style={{ width: "95px" }} />
-                          <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "2px" }}>T/month · 0 = unbounded</div>
-                        </td>
-                        <td>
-                          <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                            {vehicles.map((v) => {
-                              const val = getSegPayload(seg, v.id);
-                              const cap = getPayloadCap(v);
-                              const isOver = val > cap;
-                              return (
-                                <span key={v.id} className="num" style={{ fontSize: "11px", color: isOver && !v.allowOverloading ? "var(--bad)" : "var(--text-dim)", whiteSpace: "nowrap" }}>
-                                  <span style={{ display: "inline-block", width: "7px", height: "7px", borderRadius: "50%", background: colorForVehicle(v, vehicles), marginRight: "5px" }} />
-                                  {val.toFixed(1)}T {isOver && v.allowOverloading ? "(Over)" : ""}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        </td>
-                        <td><input type="number" value={seg.avgSpeed} onChange={(e) => updateSegmentProp(seg.id, "avgSpeed", parseFloat(e.target.value) || 0)} /></td>
-                        <td style={{ textAlign: "center" }}>
-                          <input type="checkbox" checked={seg.hasDepotAtTo} onChange={(e) => updateSegmentProp(seg.id, "hasDepotAtTo", e.target.checked)} style={{ width: "16px", height: "16px", accentColor: "var(--bev)", cursor: "pointer" }} />
-                        </td>
-                        <td>
-                          <button className="expand-btn" onClick={() => setExpandedSegmentId(expandedSegmentId === seg.id ? null : seg.id)}>
-                            {expandedSegmentId === seg.id ? "Close" : `Configure (${activeStretchesSum}%)`}
-                          </button>
-                        </td>
-                        <td>
-                          <button className="remove-btn" onClick={() => handleRemoveSegment(seg.id)} disabled={routeSegments.length <= 1} style={{ background: "transparent", border: "none", color: "var(--bad)", cursor: "pointer" }}><Trash2 size={16} /></button>
-                        </td>
-                      </tr>
-
-                      {expandedSegmentId === seg.id && (
-                        <tr>
-                          <td colSpan="9">
-                            <div className="stretch-drawer">
-                              <div style={{ marginBottom: "16px" }}>
-                                <span style={{ fontWeight: 600, fontSize: "13px", display: "block", marginBottom: "10px" }}>Cargo Payload per Vehicle</span>
-                                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                                  {vehicles.map((v) => {
-                                    const mode = payloadModes[v.id] || "T";
-                                    const cap = getPayloadCap(v);
-                                    const currentVal = getSegPayload(seg, v.id);
-                                    const warnKey = `${seg.id}_${v.id}`;
-                                    const isWarning = !!payloadWarnings[warnKey];
-                                    const isOverloaded = currentVal > cap;
-                                    
-                                    const multiplier = computeWeightedMultiplier(seg.stretches, v.allowOverloading ? currentVal : Math.min(currentVal, cap), v.type);
-
-                                    return (
-                                      <div key={v.id} style={{ background: "var(--panel)", border: `1px solid ${isWarning && !v.allowOverloading ? "var(--bad)" : "var(--border)"}`, borderRadius: "8px", padding: "10px 12px" }}>
-                                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
-                                          <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: "160px" }}>
-                                            {v.type === "electric" ? <Zap size={13} color="var(--bev)" /> : <Fuel size={13} color="var(--diesel)" />}
-                                            <span style={{ fontSize: "12.5px", fontWeight: 600 }}>{v.name}</span>
-                                          </div>
-                                          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-                                            <span style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Max {cap.toFixed(1)}T</span>
-                                            
-                                            <div className="field-input" style={{ width: "fit-content" }}>
-                                              <input
-                                                type="number"
-                                                value={mode === "%" ? (cap > 0 ? (currentVal / cap) * 100 : 0).toFixed(1) : currentVal}
-                                                max={v.allowOverloading ? undefined : (mode === "%" ? 100 : cap)}
-                                                min={0}
-                                                step={mode === "%" ? 1 : 0.5}
-                                                onChange={(e) => {
-                                                  const raw = parseFloat(e.target.value) || 0;
-                                                  const newT = mode === "%" ? (raw / 100) * cap : raw;
-                                                  updateSegmentVehiclePayload(seg.id, v.id, newT, cap, v.allowOverloading);
-                                                }}
-                                                style={{ width: "70px", padding: "6px" }}
-                                              />
-                                              <span className="field-suffix" style={{ paddingRight: 6 }}>{mode === "%" ? "%" : "T"}</span>
-                                            </div>
-
-                                            <button 
-                                              className="expand-btn" 
-                                              style={{ padding: "4px 8px", fontSize: "10px" }} 
-                                              onClick={() => setPayloadModes(p => ({...p, [v.id]: mode === "%" ? "T" : "%"}))}
-                                            >
-                                              {mode === "%" ? "Use Tonnes" : "Use %"}
-                                            </button>
-
-                                            <span className="num" style={{ fontSize: "10.5px", color: "var(--text-dim)", marginLeft: 6 }}>×{multiplier.toFixed(3)}</span>
-                                          </div>
-                                        </div>
-                                        
-                                        {isWarning && !v.allowOverloading && (
-                                          <div style={{ fontSize: "11px", color: "var(--bad)", marginTop: "6px" }}>
-                                            <AlertTriangle size={11} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} />
-                                            Capped at {cap.toFixed(1)}T — Enable "Allow Overloading" in vehicle profile to bypass this limit.
-                                          </div>
-                                        )}
-                                        
-                                        {isOverloaded && v.allowOverloading && (
-                                          <div style={{ fontSize: "11px", color: "var(--diesel)", marginTop: "6px" }}>
-                                            <AlertTriangle size={11} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} />
-                                            Overloaded by {(currentVal - cap).toFixed(1)}T — Base economy is penalized by {((currentVal - cap) * (v.overloadPenaltyPctPerTonne || 0)).toFixed(1)}%.
-                                          </div>
-                                        )}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </div>
-
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
-                                <span style={{ fontWeight: 600, fontSize: "13px" }}>Surface / Traffic Allocation (Target: 100%)</span>
-                                <span className="num badge" style={{ background: activeStretchesSum !== 100 ? "rgba(239, 68, 68, 0.1)" : "rgba(16, 185, 129, 0.1)", color: activeStretchesSum !== 100 ? "var(--bad)" : "var(--good)" }}>
-                                  Sum: {activeStretchesSum}%
-                                </span>
-                              </div>
-
-                              <div className="stretch-grid">
-                                {ROAD_TYPES.map((road) => (
-                                  <div key={road} className="stretch-card">
-                                    <div style={{ fontWeight: 700, fontSize: "10px", textTransform: "uppercase", marginBottom: "8px", color: "var(--bev)", borderBottom: "1px solid var(--border)", paddingBottom: "4px" }}>{road}</div>
-                                    {TRAFFIC_CONDITIONS.map((traffic) => {
-                                      const matched = seg.stretches.find(st => st.roadType === road && st.traffic === traffic);
-                                      const currentVal = matched ? matched.percentage : 0;
-                                      return (
-                                        <div key={traffic} className="field" style={{ marginBottom: "6px" }}>
-                                          <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>{traffic}</span>
-                                          <div className="field-input">
-                                            <input type="number" value={currentVal} onChange={(e) => updateStretchPercentage(seg.id, road, traffic, parseFloat(e.target.value) || 0)} style={{ width: "45px", padding: "4px", fontSize: "11.5px" }} />
-                                            <span style={{ fontSize: "9px", paddingRight: "4px" }}>%</span>
-                                          </div>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </React.Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-
-          <button className="add-btn" style={{ marginTop: "16px" }} onClick={handleAddSegment}>
-            <Plus size={14} /> Add Route Segment
-          </button>
-        </div>
-
-        {/* SECTION 3: Vehicle Configurations */}
-        <div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
-            <h2 style={{ margin: 0, textTransform: "uppercase", fontSize: "18px" }}><Truck size={20} style={{ verticalAlign: "-3px", marginRight: "6px", color: "var(--bev)" }} /> 3. Fleet Vehicle Profiles</h2>
+            <h2 style={{ margin: 0, borderBottom: 'none' }}><Truck size={20} color="var(--bev)" /> 2. Fleet Vehicle Profiles</h2>
             <div style={{ display: "flex", gap: "10px" }}>
               <button className="theme-btn" style={{ borderColor: "var(--diesel)", background: "rgba(226, 149, 50, 0.04)" }} onClick={() => handleAddVehicle("diesel")}>
-                <Plus size={14} /> Add Diesel Vehicle
+                <Plus size={14} /> Add Diesel
               </button>
               <button className="theme-btn" style={{ borderColor: "var(--bev)", background: "rgba(33, 196, 175, 0.04)" }} onClick={() => handleAddVehicle("electric")}>
-                <Plus size={14} /> Add Electric Vehicle
+                <Plus size={14} /> Add EV
               </button>
             </div>
           </div>
@@ -1451,9 +1142,7 @@ export default function ComprehensiveTCOCalculator() {
                       {v.type.toUpperCase()} Specifications
                     </span>
                     <input
-                      type="text"
-                      value={v.name}
-                      className="vcard-title num"
+                      type="text" value={v.name} className="vcard-title num"
                       onChange={(e) => updateVehicleProp(v.id, "name", e.target.value)}
                       style={{ background: "transparent", border: "none", color: "var(--text)", borderBottom: "1px dashed var(--border)", width: "220px", display: "block", marginTop: "4px" }}
                     />
@@ -1526,7 +1215,6 @@ export default function ComprehensiveTCOCalculator() {
                     <div>Cost/Tyre</div>
                     <div>Life (km)</div>
                   </div>
-
                   {[{key: "Front", label: "Front"}, {key: "Rear", label: "Rear"}, {key: "Trailer", label: "Trailer"}].map(axle => (
                     <div key={axle.key} style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1.5fr 1.5fr", gap: "8px", alignItems: "center" }}>
                       <div style={{ fontSize: "12px", color: "var(--text-dim)" }}>{axle.label}</div>
@@ -1555,20 +1243,17 @@ export default function ComprehensiveTCOCalculator() {
                 <div className="section-tag">Downtime & Utilization</div>
                 <Field label="Driver Rest/Delay Factor" value={v.driverRestDelayFactorKm} onChange={(val) => updateVehicleProp(v.id, "driverRestDelayFactorKm", val)} suffix="km / 1 hr delay" step={10} min={10} />
                 <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginTop: "-8px", marginBottom: "10px" }}>
-                  Calculates driver rest and miscellaneous en-route delays. E.g. 200 means 1 hour of delay added for every 200 km driven.
+                  Calculates driver rest and miscellaneous en-route delays.
                 </div>
                 <Field label="Scheduled Service (per vehicle)" value={v.scheduledDowntimeDays} onChange={(val) => updateVehicleProp(v.id, "scheduledDowntimeDays", val)} suffix="Days/Year" step={1} />
                 <Field label="Unscheduled Outages (per vehicle)" value={v.unscheduledDowntimeHrs} onChange={(val) => updateVehicleProp(v.id, "unscheduledDowntimeHrs", val)} suffix="Hours/Year" step={1} />
+                
                 {currentComputed && (
                   <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "-4px", lineHeight: 1.6 }}>
                     Driver Rest / En-route Delay (per loop): <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.generalRestDowntimeHrs.toFixed(2)} hrs</strong><br />
-                    {v.type === "electric" && (
-                      <>Charging downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.chargingDowntimeHrs.toFixed(2)} hrs</strong><br /></>
-                    )}
-                    {v.type === "diesel" && (
-                      <>Refueling downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.refuelingDowntimeHrs.toFixed(2)} hrs</strong><br /></>
-                    )}
-                    Final utilization (driving ÷ full turnaround cycle): <strong className="num" style={{ color: "var(--bev)" }}>{currentComputed.utilizationPctComputed.toFixed(1)}%</strong>
+                    {v.type === "electric" && <>Charging downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.chargingDowntimeHrs.toFixed(2)} hrs</strong><br /></>}
+                    {v.type === "diesel" && <>Refueling downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.refuelingDowntimeHrs.toFixed(2)} hrs</strong><br /></>}
+                    Final utilization (driving ÷ turnaround): <strong className="num" style={{ color: "var(--bev)" }}>{currentComputed.utilizationPctComputed.toFixed(1)}%</strong>
                   </div>
                 )}
 
@@ -1589,8 +1274,8 @@ export default function ComprehensiveTCOCalculator() {
                     <div className="section-tag"><Sparkles size={12} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} /> TCO-Optimal Charging Network</div>
                     <div className="optimizer-box">
                       <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "10px", lineHeight: 1.5 }}>
-                        Tries every combination of terminal depot-charger placement across your {routeSegments.length} route segments and finds the one with the lowest lifecycle NPV TCO for this vehicle.
-                        {routeSegments.length > 12 && " (Route has more than 12 segments - optimizer is disabled to stay fast.)"}
+                        Tries every combination of terminal depot-charger placement across your {routeSegments.length} route segments to find the lowest lifecycle NPV TCO.
+                        {routeSegments.length > 12 && " (Disabled for >12 segments)"}
                       </div>
                       {routeSegments.length <= 12 && (
                         <button className="mini-btn-outline" onClick={() => handleRunOptimizer(v.id)} disabled={optimizerRunning === v.id}>
@@ -1601,12 +1286,10 @@ export default function ComprehensiveTCOCalculator() {
                       {optResult && currentComputed && (
                         <div className="optimizer-result">
                           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-                            <span style={{ color: "var(--text-dim)" }}>Current network TCO:</span>
-                            <strong className="num">{inrCompact(currentComputed.npvTCOSum)}</strong>
+                            <span style={{ color: "var(--text-dim)" }}>Current network TCO:</span><strong className="num">{inrCompact(currentComputed.npvTCOSum)}</strong>
                           </div>
                           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-                            <span style={{ color: "var(--text-dim)" }}>Optimal network TCO:</span>
-                            <strong className="num" style={{ color: "var(--good)" }}>{inrCompact(optResult.npvTCOSum)}</strong>
+                            <span style={{ color: "var(--text-dim)" }}>Optimal network TCO:</span><strong className="num" style={{ color: "var(--good)" }}>{inrCompact(optResult.npvTCOSum)}</strong>
                           </div>
                           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "10px", borderTop: "1px dashed var(--border)", paddingTop: "6px" }}>
                             <span style={{ color: "var(--text-dim)" }}>Potential savings:</span>
@@ -1614,34 +1297,12 @@ export default function ComprehensiveTCOCalculator() {
                               {inrCompact(Math.max(0, currentComputed.npvTCOSum - optResult.npvTCOSum))}
                             </strong>
                           </div>
-
-                          {optResult.depotFlags.length === routeSegments.length && (() => {
-                            const changes = routeSegments
-                              .map((s, i) => ({ seg: s, was: s.hasDepotAtTo, will: optResult.depotFlags[i] }))
-                              .filter((c) => c.was !== c.will);
-                            if (changes.length === 0) return null;
-                            return (
-                              <div style={{ marginBottom: "10px", borderTop: "1px dashed var(--border)", paddingTop: "6px" }}>
-                                <span style={{ color: "var(--text-dim)", display: "block", marginBottom: "4px" }}>What changes:</span>
-                                <div style={{ display: "flex", flexDirection: "column", gap: "3px" }}>
-                                  {changes.map((c, ci) => (
-                                    <span key={ci} style={{ color: c.will ? "var(--good)" : "var(--bad)" }}>
-                                      {c.will ? "+ Add" : "− Remove"} depot at {c.seg.from} → {c.seg.to}
-                                    </span>
-                                  ))}
-                                </div>
-                              </div>
-                            );
-                          })()}
-
                           {optResult.depotFlags.length !== routeSegments.length ? (
-                            <span style={{ fontSize: "11.5px", color: "var(--diesel)" }}>Route has changed since this ran — re-run to refresh.</span>
+                            <span style={{ fontSize: "11.5px", color: "var(--diesel)" }}>Route has changed. Re-run to refresh.</span>
                           ) : currentComputed.npvTCOSum - optResult.npvTCOSum > 1 ? (
-                            <button className="mini-btn" onClick={() => handleApplyOptimalNetwork(v.id)}>
-                              <CheckCircle2 size={13} /> Apply This Network
-                            </button>
+                            <button className="mini-btn" onClick={() => handleApplyOptimalNetwork(v.id)}><CheckCircle2 size={13} /> Apply This Network</button>
                           ) : (
-                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Current depot placement is already optimal — nothing to change.</span>
+                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Current depot placement is already optimal.</span>
                           )}
                         </div>
                       )}
@@ -1669,39 +1330,15 @@ export default function ComprehensiveTCOCalculator() {
                           <DollarSign size={13} style={{ marginRight: 4 }} /> EMI Snapshot (per vehicle)
                         </div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: "6px" }}>
-                          <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Monthly EMI</span>
-                          <strong className="num" style={{ fontSize: "17px" }}>{inr(currentComputed.loanMonthlyEMI)}</strong>
+                          <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Monthly EMI</span><strong className="num" style={{ fontSize: "17px" }}>{inr(currentComputed.loanMonthlyEMI)}</strong>
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "10px", paddingTop: "8px", borderTop: "1px dashed var(--border)" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total vehicle cost (on-road)</span>
-                            <span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.totalUpfrontGSTPrice)}</span>
-                          </div>
-                          <div style={{ fontSize: "10.5px", color: "var(--text-dim)", lineHeight: 1.5 }}>
-                            GST + registration + trailer + one-time misc. included
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Down payment</span>
-                            <span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanUpfrontDownpayment)}</span>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Loan principal</span>
-                            <span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanPrincipalDebt)}</span>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total interest over {v.loanTenure}y</span>
-                            <span className="num" style={{ fontSize: "11.5px", color: "var(--bad)" }}>{inr(Math.max(0, currentComputed.loanAnnualEMI * v.loanTenure - currentComputed.loanPrincipalDebt))}</span>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}>
-                            <span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total repayment (principal + interest)</span>
-                            <strong className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanAnnualEMI * v.loanTenure)}</strong>
-                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total vehicle cost (on-road)</span><span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.totalUpfrontGSTPrice)}</span></div>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Down payment</span><span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanUpfrontDownpayment)}</span></div>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Loan principal</span><span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanPrincipalDebt)}</span></div>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total interest over {v.loanTenure}y</span><span className="num" style={{ fontSize: "11.5px", color: "var(--bad)" }}>{inr(Math.max(0, currentComputed.loanAnnualEMI * v.loanTenure - currentComputed.loanPrincipalDebt))}</span></div>
+                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total repayment</span><strong className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanAnnualEMI * v.loanTenure)}</strong></div>
                         </div>
-                        {currentComputed.fleetSizeRequired > 1 && (
-                          <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginTop: "8px", paddingTop: "8px", borderTop: "1px dashed var(--border)" }}>
-                            Across the sized fleet of <strong className="num">{currentComputed.fleetSizeRequired}</strong> units, that's <strong className="num">{inrCompact(currentComputed.loanMonthlyEMI * currentComputed.fleetSizeRequired)}</strong>/month total.
-                          </div>
-                        )}
                       </div>
                     )}
                   </>
@@ -1710,659 +1347,697 @@ export default function ComprehensiveTCOCalculator() {
             );})}
           </div>
         </div>
+      )}
 
-        {/* SECTION 4: Safety Warnings */}
-        {results.computedVehicles.some(v => v.segmentOverloads.length > 0) && (
-          <div className="alert-strip">
-            <AlertTriangle size={20} style={{ flexShrink: 0, color: "var(--bad)" }} />
-            <div>
-              <strong style={{ display: "block", marginBottom: "4px", fontSize: "14px" }}>Payload Sizing Violations Detected!</strong>
-              The cargo payload configured for some route segments exceeds the maximum carrying capacity of your vehicles.
-              <div style={{ marginTop: "8px", display: "flex", flexDirection: "column", gap: "4px" }}>
-                {results.computedVehicles.map(v => {
-                  if (v.segmentOverloads.length === 0) return null;
+      {/* SECTION 3: Route Planner */}
+      {activeTab === 'route' && (
+        <div className="panel">
+          <h2><MapPin size={18} color="var(--bev)" /> 3. Route Planner & Charging Network</h2>
+          <div style={{ overflowX: "auto" }}>
+            <table className="route-table">
+              <thead>
+                <tr>
+                  <th>From Node</th>
+                  <th>To Node</th>
+                  <th>Distance (km)</th>
+                  <th>Monthly Tonnage Demand</th>
+                  <th>Payload (per vehicle)</th>
+                  <th>Avg Speed (km/h)</th>
+                  <th style={{ textAlign: "center" }}>Depot Charger at Target?</th>
+                  <th>Custom Duty Cycle</th>
+                  <th style={{ width: "40px" }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {routeSegments.map((seg) => {
+                  const activeStretchesSum = seg.stretches.reduce((sum, st) => sum + st.percentage, 0);
                   return (
-                    <div key={v.id} style={{ fontSize: "12px", color: "var(--text-dim)" }}>
-                      · <strong>{v.name}</strong> payload capacity is capped at <strong>{v.payloadCap.toFixed(1)}T</strong> (Segment cargo limits scaled down internally). 
-                      <em style={{display: 'block', marginTop: 2, color: 'var(--text-dim)'}}>Enable "Allow Overloading" in the vehicle profile to override this constraint.</em>
-                    </div>
+                    <React.Fragment key={seg.id}>
+                      <tr>
+                        <td><input type="text" value={seg.from} onChange={(e) => updateSegmentProp(seg.id, "from", e.target.value)} /></td>
+                        <td><input type="text" value={seg.to} onChange={(e) => updateSegmentProp(seg.id, "to", e.target.value)} /></td>
+                        <td><input type="number" value={seg.distance} onChange={(e) => updateSegmentProp(seg.id, "distance", parseFloat(e.target.value) || 0)} /></td>
+                        <td>
+                          <input type="number" value={seg.monthlyTonnage || 0} step={100} onChange={(e) => updateSegmentProp(seg.id, "monthlyTonnage", parseFloat(e.target.value) || 0)} style={{ width: "95px" }} />
+                          <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "2px" }}>T/month · 0 = unbounded</div>
+                        </td>
+                        <td>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                            {vehicles.map((v) => {
+                              const val = getSegPayload(seg, v.id);
+                              const cap = getPayloadCap(v);
+                              const isOver = val > cap;
+                              return (
+                                <span key={v.id} className="num" style={{ fontSize: "11px", color: isOver && !v.allowOverloading ? "var(--bad)" : "var(--text-dim)", whiteSpace: "nowrap" }}>
+                                  <span style={{ display: "inline-block", width: "7px", height: "7px", borderRadius: "50%", background: colorForVehicle(v, vehicles), marginRight: "5px" }} />
+                                  {val.toFixed(1)}T {isOver && v.allowOverloading ? "(Over)" : ""}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        </td>
+                        <td><input type="number" value={seg.avgSpeed} onChange={(e) => updateSegmentProp(seg.id, "avgSpeed", parseFloat(e.target.value) || 0)} /></td>
+                        <td style={{ textAlign: "center" }}>
+                          <input type="checkbox" checked={seg.hasDepotAtTo} onChange={(e) => updateSegmentProp(seg.id, "hasDepotAtTo", e.target.checked)} style={{ width: "16px", height: "16px", accentColor: "var(--bev)", cursor: "pointer" }} />
+                        </td>
+                        <td>
+                          <button className="expand-btn" onClick={() => setExpandedSegmentId(expandedSegmentId === seg.id ? null : seg.id)}>
+                            {expandedSegmentId === seg.id ? "Close" : `Configure (${activeStretchesSum}%)`}
+                          </button>
+                        </td>
+                        <td>
+                          <button className="remove-btn" onClick={() => handleRemoveSegment(seg.id)} disabled={routeSegments.length <= 1} style={{ background: "transparent", border: "none", color: "var(--bad)", cursor: "pointer" }}><Trash2 size={16} /></button>
+                        </td>
+                      </tr>
+
+                      {expandedSegmentId === seg.id && (
+                        <tr>
+                          <td colSpan="9">
+                            <div className="stretch-drawer">
+                              <div style={{ marginBottom: "16px" }}>
+                                <span style={{ fontWeight: 600, fontSize: "13px", display: "block", marginBottom: "10px" }}>Cargo Payload per Vehicle</span>
+                                <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                                  {vehicles.map((v) => {
+                                    const mode = payloadModes[v.id] || "T";
+                                    const cap = getPayloadCap(v);
+                                    const currentVal = getSegPayload(seg, v.id);
+                                    const warnKey = `${seg.id}_${v.id}`;
+                                    const isWarning = !!payloadWarnings[warnKey];
+                                    const isOverloaded = currentVal > cap;
+                                    
+                                    const multiplier = computeWeightedMultiplier(seg.stretches, v.allowOverloading ? currentVal : Math.min(currentVal, cap), v.type, dieselMatrix, evMatrix);
+
+                                    return (
+                                      <div key={v.id} style={{ background: "var(--panel)", border: `1px solid ${isWarning && !v.allowOverloading ? "var(--bad)" : "var(--border)"}`, borderRadius: "8px", padding: "10px 12px" }}>
+                                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", flexWrap: "wrap" }}>
+                                          <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: "160px" }}>
+                                            {v.type === "electric" ? <Zap size={13} color="var(--bev)" /> : <Fuel size={13} color="var(--diesel)" />}
+                                            <span style={{ fontSize: "12.5px", fontWeight: 600 }}>{v.name}</span>
+                                          </div>
+                                          <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                                            <span style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Max {cap.toFixed(1)}T</span>
+                                            <div className="field-input" style={{ width: "fit-content" }}>
+                                              <input
+                                                type="number" value={mode === "%" ? (cap > 0 ? (currentVal / cap) * 100 : 0).toFixed(1) : currentVal}
+                                                max={v.allowOverloading ? undefined : (mode === "%" ? 100 : cap)} min={0} step={mode === "%" ? 1 : 0.5}
+                                                onChange={(e) => {
+                                                  const raw = parseFloat(e.target.value) || 0;
+                                                  const newT = mode === "%" ? (raw / 100) * cap : raw;
+                                                  updateSegmentVehiclePayload(seg.id, v.id, newT, cap, v.allowOverloading);
+                                                }}
+                                                style={{ width: "70px", padding: "6px" }}
+                                              />
+                                              <span className="field-suffix" style={{ paddingRight: 6 }}>{mode === "%" ? "%" : "T"}</span>
+                                            </div>
+                                            <button className="expand-btn" style={{ padding: "4px 8px", fontSize: "10px" }} onClick={() => setPayloadModes(p => ({...p, [v.id]: mode === "%" ? "T" : "%"}))}>
+                                              {mode === "%" ? "Use Tonnes" : "Use %"}
+                                            </button>
+                                            <span className="num" style={{ fontSize: "10.5px", color: "var(--text-dim)", marginLeft: 6 }}>×{multiplier.toFixed(3)}</span>
+                                          </div>
+                                        </div>
+                                        
+                                        {isWarning && !v.allowOverloading && (
+                                          <div style={{ fontSize: "11px", color: "var(--bad)", marginTop: "6px" }}>
+                                            <AlertTriangle size={11} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} /> Capped at {cap.toFixed(1)}T — Enable "Allow Overloading" in vehicle profile to bypass.
+                                          </div>
+                                        )}
+                                        {isOverloaded && v.allowOverloading && (
+                                          <div style={{ fontSize: "11px", color: "var(--diesel)", marginTop: "6px" }}>
+                                            <AlertTriangle size={11} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} /> Overloaded by {(currentVal - cap).toFixed(1)}T — Base economy is penalized by {((currentVal - cap) * (v.overloadPenaltyPctPerTonne || 0)).toFixed(1)}%.
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
+                                <span style={{ fontWeight: 600, fontSize: "13px" }}>Surface / Traffic Allocation (Target: 100%)</span>
+                                <span className="num badge" style={{ background: activeStretchesSum !== 100 ? "rgba(239, 68, 68, 0.1)" : "rgba(16, 185, 129, 0.1)", color: activeStretchesSum !== 100 ? "var(--bad)" : "var(--good)" }}>
+                                  Sum: {activeStretchesSum}%
+                                </span>
+                              </div>
+
+                              <div className="stretch-grid">
+                                {ROAD_TYPES.map((road) => (
+                                  <div key={road} className="stretch-card">
+                                    <div style={{ fontWeight: 700, fontSize: "10px", textTransform: "uppercase", marginBottom: "8px", color: "var(--bev)", borderBottom: "1px solid var(--border)", paddingBottom: "4px" }}>{road}</div>
+                                    {TRAFFIC_CONDITIONS.map((traffic) => {
+                                      const matched = seg.stretches.find(st => st.roadType === road && st.traffic === traffic);
+                                      const currentVal = matched ? matched.percentage : 0;
+                                      return (
+                                        <div key={traffic} className="field" style={{ marginBottom: "6px" }}>
+                                          <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>{traffic}</span>
+                                          <div className="field-input">
+                                            <input type="number" value={currentVal} onChange={(e) => updateStretchPercentage(seg.id, road, traffic, parseFloat(e.target.value) || 0)} style={{ width: "45px", padding: "4px", fontSize: "11.5px" }} />
+                                            <span style={{ fontSize: "9px", paddingRight: "4px" }}>%</span>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   );
                 })}
-              </div>
+              </tbody>
+            </table>
+          </div>
+          <button className="add-btn" style={{ marginTop: "16px" }} onClick={handleAddSegment}>
+            <Plus size={14} /> Add Route Segment
+          </button>
+        </div>
+      )}
+
+      {/* SECTION 4: Efficiency Matrices Editor */}
+      {activeTab === 'matrices' && (
+        <div className="panel">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
+            <h2 style={{ margin: 0, padding: 0, borderBottom: 'none' }}><Activity size={18} color="var(--bev)" /> 4. Efficiency Multipliers</h2>
+            <div className="seg" style={{ width: "220px" }}>
+              <button className={matrixEditMode === "diesel" ? "active" : ""} onClick={() => setMatrixEditMode("diesel")}>Diesel Matrices</button>
+              <button className={matrixEditMode === "electric" ? "active" : ""} onClick={() => setMatrixEditMode("electric")}>EV Matrices</button>
             </div>
           </div>
-        )}
 
-        {/* Breakeven widget */}
-        {results.firstDiesel && results.firstElectric && (
-          <div className="breakeven-strip">
-            <TrendingUp size={22} style={{ flexShrink: 0, color: "var(--bev)" }} />
-            <strong style={{ fontSize: "14px" }}>
-              {results.breakevenYear !== null
-                ? `Breakeven: EV cheaper than Diesel from Year ${results.breakevenYear.toFixed(1)}`
-                : "No breakeven within the analysis horizon"}
-            </strong>
+          <div style={{ fontSize: "12px", color: "var(--text-dim)", marginBottom: "20px", lineHeight: 1.5 }}>
+            These matrices define the physics/efficiency multipliers applied to a vehicle's base economy based on road conditions, traffic, and cargo payload tiers. Values interpolate seamlessly for payloads falling between tiers.
+            Baseline 1.0 logic operates at zero-load ideal conditions for standard calculations.
           </div>
-        )}
 
-        {/* SECTION 5: Analytics Dashboard */}
+          <div style={{ overflowX: "auto" }}>
+            <table className="route-table" style={{ background: "var(--panel-alt)", borderRadius: "8px" }}>
+              <thead>
+                <tr>
+                  <th>Road Type</th>
+                  <th>Traffic Condition</th>
+                  <th style={{ textAlign: "right" }}>0T Payload</th>
+                  <th style={{ textAlign: "right" }}>20T Payload</th>
+                  <th style={{ textAlign: "right" }}>40T Payload</th>
+                  <th style={{ textAlign: "right" }}>60T Payload</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ROAD_TYPES.map((road) => (
+                  <React.Fragment key={road}>
+                    {TRAFFIC_CONDITIONS.map((traffic, tIdx) => {
+                      const matrixState = matrixEditMode === 'diesel' ? dieselMatrix : evMatrix;
+                      const roadData = matrixState[road] || {};
+                      const trafficData = roadData[traffic] || {};
+                      
+                      return (
+                        <tr key={`${road}-${traffic}`}>
+                          {tIdx === 0 && <td rowSpan={3} style={{ fontWeight: 600, verticalAlign: "middle", borderBottom: "2px solid var(--border)", borderRight: "1px solid var(--border)" }}>{road}</td>}
+                          <td style={{ borderBottom: tIdx === 2 ? "2px solid var(--border)" : "1px solid var(--border)" }}>{traffic}</td>
+                          {PAYLOAD_KEYS.map(payload => (
+                            <td key={payload} style={{ borderBottom: tIdx === 2 ? "2px solid var(--border)" : "1px solid var(--border)" }}>
+                              <div className="field-input" style={{ width: "80px", marginLeft: "auto" }}>
+                                <input 
+                                  type="number" 
+                                  step="0.01" 
+                                  value={trafficData[payload] !== undefined ? trafficData[payload] : 1.0} 
+                                  onChange={(e) => updateMatrixValue(matrixEditMode, road, traffic, payload, parseFloat(e.target.value) || 0)} 
+                                  style={{ width: "80px" }} 
+                                />
+                              </div>
+                            </td>
+                          ))}
+                        </tr>
+                      )
+                    })}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* SECTION 5: Analytics Dashboard */}
+      {activeTab === 'results' && (
         <div className="panel" style={{ border: "2px solid var(--bev)", boxShadow: "var(--shadow-glow)" }}>
-          <h2 style={{ color: "var(--bev)" }}><TrendingUp size={20} /> 4. Analytics Dashboard</h2>
+          <h2 style={{ color: "var(--bev)", marginBottom: "16px" }}><TrendingUp size={20} /> 5. Analytics Dashboard</h2>
+          
+          {results.firstDiesel && results.firstElectric && (
+            <div className="breakeven-strip">
+              <TrendingUp size={22} style={{ flexShrink: 0, color: "var(--bev)" }} />
+              <strong style={{ fontSize: "14px" }}>
+                {results.breakevenYear !== null
+                  ? `Breakeven: EV cheaper than Diesel from Year ${results.breakevenYear.toFixed(1)}`
+                  : "No breakeven within the analysis horizon"}
+              </strong>
+            </div>
+          )}
 
-          {/* Sizing KPIs */}
-          <div className="kpi-grid">
-            {results.computedVehicles.map((v, idx) => (
-              <div key={v.id} className="kpi-card" style={{ borderTop: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
-                <div className="kpi-label">{v.name} ({v.fleetSizeRequired} Units Sized{v.usesSegmentDemand ? " (Demand Sized)" : " (Single Unit Default)"})</div>
-                <div className="kpi-val num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>
-                  {inrCompact(v.npvTCOSum)}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: "6px", marginBottom: "8px" }}>
-                  <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Overall Est. Rate per Trip</span>
-                  <span className="num" style={{ fontWeight: 700, fontSize: "12.5px" }}>₹{Math.round(v.totalFreightRatePerTonneTrip)}/Ton</span>
-                </div>
-                <div className="kpi-sub">
-                  Turnaround: <strong className="num">{v.turnaroundCycleHrs.toFixed(2) } Hrs</strong><br />
-                  Utilization: <strong className="num">{v.utilizationPctComputed.toFixed(1)}%</strong><br />
-                  Trips/Yr/Unit: <strong className="num">{Math.round(v.tripsPerYearPerVehicle)}</strong><br />
-                  Effective Economy: <strong className="num">{v.avgRouteEconomy.toFixed(2)} {v.type === "diesel" ? "km/l" : "km/kWh"}</strong><br />
-                  Drivers: <strong className="num">{v.driversPerVehicle}/truck</strong><br />
-                  {v.type === "electric" ? (
-                    <>
-                      Station Count: <strong className="num">{v.uniqueStationsCount} Stops</strong><br />
-                      Total Sized Chargers: <strong className="num">{v.totalChargersNeeded} Units</strong><br />
-                      Sized EV Fleet Size: <strong className="num" style={{ color: "var(--bev)" }}>{v.fleetSizeRequired} Deployments</strong>
-                    </>
-                  ) : (
-                    <>
-                      Sized Diesel Fleet Size: <strong className="num" style={{ color: "var(--diesel)" }}>{v.fleetSizeRequired} Deployments</strong><br />
-                      Avg. Refuels/Loop: <strong className="num">{v.refuelingStopsCount.toFixed(1)} Stops</strong>
-                    </>
-                  )}
-                </div>
-              </div>
+          <div className="sub-tabs">
+            {RESULT_TABS.map(tab => (
+              <button 
+                key={tab.id} 
+                className={`sub-tab ${activeResultTab === tab.id ? 'active' : ''}`}
+                onClick={() => setActiveResultTab(tab.id)}
+              >
+                {tab.icon} {tab.label}
+              </button>
             ))}
           </div>
 
-          <div style={{ marginTop: "8px", marginBottom: "24px" }}>
-            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-              <DollarSign size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-              Capital Deployment & Infrastructure Summary
-            </h3>
-            <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px", lineHeight: 1.5 }}>
-              "Loaded Capex/Truck" is the fully-loaded capital cost of putting one truck into service — its own on-road price plus that truck's proportional share of the charging network build-out (stations + chargers, ex-subsidy). For diesel vehicles there's no charging infra, so loaded capex equals the on-road price.
-            </div>
-            <div style={{ overflowX: "auto" }}>
-              <table className="time-split-table">
-                <thead>
-                  <tr>
-                    <th>Vehicle</th>
-                    <th>Fleet Size</th>
-                    <th>On-Road Price / Truck</th>
-                    <th>Equity (Down Payment) / Truck</th>
-                    <th>Charging Infra Capex (Total)</th>
-                    <th>Infra Capex Allocated / Truck</th>
-                    <th>Loaded Capex / Truck</th>
-                    <th>Total Fleet Upfront Capex (Equity + Infra)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {results.computedVehicles.map((v) => (
-                    <tr key={v.id}>
-                      <td style={{ color: colorForVehicle(v, results.computedVehicles), fontWeight: 600 }}>{v.name}</td>
-                      <td className="num">{v.fleetSizeRequired}</td>
-                      <td className="num">{inr(v.totalUpfrontGSTPrice)}</td>
-                      <td className="num">{inr(v.loanUpfrontDownpayment)}</td>
-                      <td className="num">{v.type === "electric" ? inr(v.capitalSetupInfra) : "—"}</td>
-                      <td className="num">{v.type === "electric" ? inr(v.infraCapexPerTruck) : "—"}</td>
-                      <td className="num" style={{ fontWeight: 700, color: colorForVehicle(v, results.computedVehicles) }}>{inr(v.loadedCapexPerTruckOnRoad)}</td>
-                      <td className="num" style={{ fontWeight: 700 }}>{inrCompact(v.totalFleetUpfrontCapex)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {results.computedVehicles.some(v => v.type === "electric") && (
-              <div style={{ fontSize: "11px", color: "var(--text-dim)", marginTop: "10px", lineHeight: 1.5 }}>
-                Charging infra capex is shared across every EV in that fleet's sizing, so it shrinks per truck as the fleet grows and stations see more utilization. Full-fleet infra spend, station count and total chargers are shown in the "Charger Infrastructure Sizing" section on each EV's profile card and in the "Charging Station Sizing" table below.
-              </div>
-            )}
-          </div>
-
-          <div style={{ marginTop: "8px", marginBottom: "24px" }}>
-            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-              <Route size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-              Cost & Estimated Freight Rate by Segment
-            </h3>
-            <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px", lineHeight: 1.5 }}>
-              Freight rates per Tonne and per Tonne-Km are calculated by dynamically socializing the cost of unladen return trips across the revenue-generating (loaded) segments. Empty segments show "Empty payload" but their operating and time costs heavily impact the rates of the loaded segments!
-            </div>
-            <div style={{ overflowX: "auto" }}>
-              <table className="seg-cost-table">
-                <thead>
-                  <tr>
-                    <th>Segment / Vehicle</th>
-                    {results.computedVehicles.map((v) => (
-                      <th key={v.id} style={{ color: colorForVehicle(v, results.computedVehicles), minWidth: '150px' }}>{v.name}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr style={{ background: "var(--panel-alt)" }}>
-                    <td><strong>Total Loop (Socialized)</strong></td>
-                    {results.computedVehicles.map((v) => (
-                      <td key={v.id} className="num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>
-                        <div style={{ fontWeight: 700 }}>₹{Math.round(v.totalFreightRatePerTonneTrip)} / Ton</div>
-                        <div style={{ fontSize: "11px", fontWeight: 600, marginTop: "2px" }}>₹{v.requiredFreightRatePerTonneKm.toFixed(3)} / Ton-km</div>
-                      </td>
-                    ))}
-                  </tr>
-                  {routeSegments.map((seg, segIdx) => (
-                    <tr key={seg.id}>
-                      <td>{seg.from} → {seg.to} <span style={{ color: "var(--text-dim)", display: "block", fontSize: "11px", marginTop: "2px" }}>({seg.distance} km{seg.monthlyTonnage > 0 ? `, ${seg.monthlyTonnage.toLocaleString("en-IN")}T/mo` : ""})</span></td>
-                      {results.computedVehicles.map((v) => {
-                        const segData = v.segmentCostPerTonneKm[segIdx];
-                        if (!segData || segData.freightRatePerTonneSeg === null) return (
-                            <td key={v.id} className="num" style={{ color: "var(--text-dim)" }}>
-                              — <span style={{ fontSize: "10.5px" }}>(Empty payload)</span>
-                            </td>
-                        );
-                        
-                        return (
-                          <td key={v.id} className="num">
-                            <div style={{ fontWeight: 600, color: "var(--text)" }}>₹{Math.round(segData.freightRatePerTonneSeg)} / Ton</div>
-                            <div style={{ fontSize: "11px", color: "var(--text)", marginTop: "2px" }}>₹{segData.freightRatePerTonneKmSeg.toFixed(3)} / Ton-km</div>
-                            <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "4px" }}>Base cost: ₹{Math.round(segData.costPerTonneSeg)}/t</div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          <div style={{ marginTop: "32px", marginBottom: "32px" }}>
-             <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-               <BarChart3 size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-               Estimated Segment Freight Rates (₹/Ton)
-             </h3>
-             <ResponsiveContainer width="100%" height={320}>
-               <BarChart data={results.segmentFreightData} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
-                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                 <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} />
-                 <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => `₹${v}`} />
-                 <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `₹${Math.round(v)}/Ton`} />
-                 <Legend wrapperStyle={{ fontSize: 12 }} />
-                 {results.computedVehicles.map((v) => (
-                   <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)} radius={[4, 4, 0, 0]} />
-                 ))}
-               </BarChart>
-             </ResponsiveContainer>
-          </div>
-
-          <div style={{ marginTop: "32px", marginBottom: "32px" }}>
-             <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-               <Clock size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-               Time Allocation Breakdown (% of Trip Cycle)
-             </h3>
-             <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px" }}>
-               Shows where vehicles spend their time during a single full route loop. Crucial for understanding how charging downtime impacts EV utilization vs diesel equivalents.
-             </div>
-             <ResponsiveContainer width="100%" height={150}>
-               <BarChart layout="vertical" data={results.timeUtilizationData} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
-                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" horizontal={false} />
-                 <XAxis type="number" domain={[0, 100]} stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => `${v}%`} />
-                 <YAxis dataKey="name" type="category" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} width={120} />
-                 <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `${Number(v).toFixed(1)}%`} />
-                 <Legend wrapperStyle={{ fontSize: 12 }} />
-                 <Bar dataKey="Driving" stackId="a" fill="var(--bev)" />
-                 <Bar dataKey="Load/Unload" stackId="a" fill="#8b5cf6" />
-                 <Bar dataKey="Refuel / Charge" stackId="a" fill="#ef4444" />
-                 <Bar dataKey="Rest/Queue" stackId="a" fill="#6b7280" />
-               </BarChart>
-             </ResponsiveContainer>
-
-             <div style={{ overflowX: "auto" }}>
-               <table className="time-split-table">
-                 <thead>
-                   <tr>
-                     <th>Vehicle</th>
-                     <th>Driving</th>
-                     <th>Load/Unload</th>
-                     <th>Refuel / Charge</th>
-                     <th>Rest/Queue</th>
-                     <th>Full Turnaround Cycle</th>
-                   </tr>
-                 </thead>
-                 <tbody>
-                   {results.computedVehicles.map((v) => {
-                     const refuelChargeHrs = v.chargingDowntimeHrs + (v.refuelingDowntimeHrs || 0);
-                     return (
-                       <tr key={v.id}>
-                         <td style={{ color: colorForVehicle(v, results.computedVehicles), fontWeight: 600 }}>{v.name}</td>
-                         <td className="num">{v.drivingHrs.toFixed(2)} hrs</td>
-                         <td className="num">{v.loadUnloadHrs.toFixed(2)} hrs</td>
-                         <td className="num">{refuelChargeHrs.toFixed(2)} hrs</td>
-                         <td className="num">{v.generalRestDowntimeHrs.toFixed(2)} hrs</td>
-                         <td className="num" style={{ fontWeight: 700 }}>{v.turnaroundCycleHrs.toFixed(2)} hrs</td>
-                       </tr>
-                     );
-                   })}
-                 </tbody>
-               </table>
-             </div>
-          </div>
-
-          <div style={{ marginTop: "32px" }}>
-            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-              NPV Cost Accrual Over Project Horizon ({results.years} Years)
-            </h3>
-            <div className="legend-row">
-              {results.computedVehicles.map((v, idx) => (
-                <span key={v.id}>
-                  <span className="legend-dot" style={{ background: colorForVehicle(v, results.computedVehicles) }} />
-                  {v.name}
-                </span>
-              ))}
-            </div>
-            <ResponsiveContainer width="100%" height={340}>
-              <LineChart data={results.chartData} margin={{ top: 10, right: 30, left: 10, bottom: 25 }}>
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="year"
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  label={{ value: "Operating Year", position: "insideBottom", offset: -12, style: { fill: "var(--text-dim)", fontSize: 12 } }}
-                />
-                <YAxis
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  tickFormatter={(v) => inrCompact(v)}
-                  width={80}
-                  label={{ value: "Cumulative NPV Cost", angle: -90, position: "insideLeft", style: { fill: "var(--text-dim)", fontSize: 12, textAnchor: "middle" } }}
-                />
-                <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
-                {results.computedVehicles.map((v, idx) => (
-                  <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.5} dot={{ r: 3 }} />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div style={{ marginTop: "32px" }}>
-            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-              NPV Cost Category Breakdown Comparison (with % difference vs baseline)
-            </h3>
-            <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "12px" }}>
-              Percentage labels above bars show the relative difference (+/-) from the baseline vehicle (the first vehicle).
-            </div>
-            <ResponsiveContainer width="100%" height={380}>
-              <BarChart
-                data={[
-                  { category: "Capital & Infra", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.upfront }), {}) },
-                  { category: "Fuel/Energy", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.fuelOrEnergy }), {}) },
-                  { category: "EMI/Debt", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.emi }), {}) },
-                  { category: "Maint & Ins", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.maintenance + v.breakdown.insurance }), {}) },
-                  { category: "Wages & Drivers", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.wages }), {}) },
-                  { category: "Operator Margin", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.operatorMargin }), {}) },
-                  { category: "Tolls & Tyres", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.tolls + v.breakdown.tyres }), {}) },
-                  { category: "Battery Swaps", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.batteryReplacements }), {}) },
-                  { category: "Depot Upkeep", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.infraMaintenance }), {}) },
-                  { category: "Misc", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.misc }), {}) }
-                ]}
-                margin={{ top: 20, right: 30, left: 10, bottom: 70 }}
-              >
-                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="category"
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  interval={0}
-                  angle={-35}
-                  textAnchor="end"
-                  height={70}
-                />
-                <YAxis
-                  stroke="var(--text-dim)"
-                  tick={{ fontSize: 11, fill: "var(--text-dim)" }}
-                  tickFormatter={(v) => inrCompact(v)}
-                  width={80}
-                />
-                <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
-                <Legend wrapperStyle={{ fontSize: 12, top: 0 }} />
-                {results.computedVehicles.map((v, idx) => (
-                  <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)}>
-                     {idx > 0 && <LabelList dataKey={v.name} content={(props) => renderCustomBarLabel(props)} />}
-                  </Bar>
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-
-          <div style={{ marginTop: "32px", marginBottom: "16px" }}>
-            <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-              <PieChartIcon size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-              Cost Breakdown Split (Per Vehicle)
-            </h3>
-            
-            <div className="grid-auto-fit">
-              {results.computedVehicles.map((v, vIdx) => {
-                const pieDataRaw = [
-                  { name: "Capital & Infra", value: v.breakdown.upfront },
-                  { name: "Fuel/Energy", value: v.breakdown.fuelOrEnergy },
-                  { name: "EMI/Debt", value: v.breakdown.emi },
-                  { name: "Maintenance & Ins", value: v.breakdown.maintenance + v.breakdown.insurance },
-                  { name: "Wages & Drivers", value: v.breakdown.wages },
-                  { name: "Tolls & Tyres", value: v.breakdown.tolls + v.breakdown.tyres },
-                  { name: "Battery Replacements", value: v.breakdown.batteryReplacements },
-                  { name: "Depot Upkeep", value: v.breakdown.infraMaintenance },
-                  { name: "Misc Overheads", value: v.breakdown.misc },
-                  { name: "Operator Margin", value: v.breakdown.operatorMargin }
-                ].filter(d => d.value > 0);
-
-                const totalValue = pieDataRaw.reduce((acc, d) => acc + d.value, 0);
-                
-                // Keep the original objects to ensure indices match colors
-                return (
-                  <div key={v.id} className="kpi-card pie-chart-container" style={{ borderLeft: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
-                    <div className="kpi-label" style={{ marginBottom: "16px", alignSelf: "flex-start" }}>{v.name} Total TCO Split</div>
-                    <ResponsiveContainer width="100%" height={240}>
-                      <PieChart>
-                        <Pie
-                          data={pieDataRaw}
-                          cx="50%"
-                          cy="50%"
-                          innerRadius={65}
-                          outerRadius={95}
-                          paddingAngle={2}
-                          dataKey="value"
-                        >
-                          {pieDataRaw.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                          ))}
-                        </Pie>
-                        <Tooltip 
-                          contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "12px", borderRadius: "8px" }} 
-                          formatter={(value, name) => [inr(value), name]} 
-                        />
-                      </PieChart>
-                    </ResponsiveContainer>
-                    <div className="pie-legend">
-                      {pieDataRaw.map((entry, index) => {
-                        const pct = ((entry.value / totalValue) * 100).toFixed(1);
-                        return (
-                          <div key={index} className="pie-legend-item">
-                            <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: PIE_COLORS[index % PIE_COLORS.length] }}></span>
-                            <span>{entry.name} ({pct}%)</span>
-                          </div>
-                        )
-                      })}
+          {/* Sub-tab 1: Summary & KPIs */}
+          {activeResultTab === 'kpi' && (
+            <div className="anim-fade">
+              <div className="kpi-grid">
+                {results.computedVehicles.map((v) => (
+                  <div key={v.id} className="kpi-card" style={{ borderTop: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
+                    <div className="kpi-label">{v.name} ({v.fleetSizeRequired} Units{v.usesSegmentDemand ? " Demand Sized" : ""})</div>
+                    <div className="kpi-val num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>{inrCompact(v.npvTCOSum)}</div>
+                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: "6px", marginBottom: "8px" }}>
+                      <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Est. Rate per Trip</span>
+                      <span className="num" style={{ fontWeight: 700, fontSize: "12.5px" }}>₹{Math.round(v.totalFreightRatePerTonneTrip)}/Ton</span>
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {results.computedVehicles.some(v => v.type === "electric") && (
-            <div style={{ background: "var(--panel-alt)", padding: "18px", borderRadius: "10px", marginBottom: "24px", border: "1px solid var(--border)" }}>
-              <div className="kpi-label" style={{ color: "var(--bev)" }}>
-                <BatteryCharging size={16} style={{ marginRight: 6 }} /> Charging Sequence Trace
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "20px", marginTop: "12px" }}>
-                {results.computedVehicles.map((v) => {
-                  if (v.type !== "electric") return null;
-                  return (
-                    <div key={v.id} style={{ flex: 1, minWidth: "300px" }}>
-                      <strong style={{ fontSize: "13px", display: "block", marginBottom: "4px" }}>{v.name} Charge Event Sequence:</strong>
-                      <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "8px" }}>
-                        * Simulates worst-case at End-of-Life SOH ({v.resolvedSOHReplacementLimit.toFixed(1)}%) to guarantee route feasibility throughout lifecycle.
-                      </div>
-                      {v.stopsLog.length === 0 ? (
-                        <div style={{ fontSize: "12.5px", color: "var(--text-dim)" }}>
-                          No charging stops required. The truck completes its entire route loop within its single-charge range safely.
-                        </div>
+                    <div className="kpi-sub">
+                      Turnaround: <strong className="num">{v.turnaroundCycleHrs.toFixed(2) } Hrs</strong><br />
+                      Utilization: <strong className="num">{v.utilizationPctComputed.toFixed(1)}%</strong><br />
+                      Trips/Yr/Unit: <strong className="num">{Math.round(v.tripsPerYearPerVehicle)}</strong><br />
+                      Effective Economy: <strong className="num">{v.avgRouteEconomy.toFixed(2)} {v.type === "diesel" ? "km/l" : "km/kWh"}</strong><br />
+                      Drivers: <strong className="num">{v.driversPerVehicle}/truck</strong><br />
+                      {v.type === "electric" ? (
+                        <>
+                          Stations: <strong className="num">{v.uniqueStationsCount} Stops</strong><br />
+                          Total Sized Chargers: <strong className="num">{v.totalChargersNeeded} Units</strong>
+                        </>
                       ) : (
-                        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                          {v.stopsLog.map((log, lIdx) => (
-                            <div key={lIdx} style={{ fontSize: "12px", background: "var(--panel)", padding: "10px", borderRadius: "8px", borderLeft: "3px solid var(--bev)" }}>
-                              <strong>Stop {lIdx + 1}: {log.label}</strong> (at {log.km} km)<br />
-                              <div style={{ color: "var(--text-dim)", marginTop: "4px" }}>
-                                Leg Energy: <span className="num">{Math.round(log.energyLegConsumed)} kWh</span> |
-                                SoC: <span className="num">{log.socBefore}%</span> → <span className="num">{log.socAfter}%</span> |
-                                Charge Time: <span className="num">{(log.chargeTimeHrs * 60).toFixed(0)} min</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
+                        <>
+                          Avg. Refuels/Loop: <strong className="num">{v.refuelingStopsCount.toFixed(1)} Stops</strong>
+                        </>
                       )}
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ marginTop: "16px", marginBottom: "24px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  <DollarSign size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                  Capital Deployment & Infrastructure Summary
+                </h3>
+                <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px", lineHeight: 1.5 }}>
+                  "Loaded Capex/Truck" is the fully-loaded capital cost of putting one truck into service — its own on-road price plus that truck's proportional share of the charging network build-out.
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="time-split-table">
+                    <thead>
+                      <tr>
+                        <th>Vehicle</th><th>Fleet Size</th><th>On-Road Price / Truck</th><th>Equity (Down Payment)</th>
+                        <th>Charging Infra Capex (Total)</th><th>Infra Capex Allocated / Truck</th><th>Loaded Capex / Truck</th><th>Total Fleet Upfront Capex</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {results.computedVehicles.map((v) => (
+                        <tr key={v.id}>
+                          <td style={{ color: colorForVehicle(v, results.computedVehicles), fontWeight: 600 }}>{v.name}</td>
+                          <td className="num">{v.fleetSizeRequired}</td>
+                          <td className="num">{inr(v.totalUpfrontGSTPrice)}</td>
+                          <td className="num">{inr(v.loanUpfrontDownpayment)}</td>
+                          <td className="num">{v.type === "electric" ? inr(v.capitalSetupInfra) : "—"}</td>
+                          <td className="num">{v.type === "electric" ? inr(v.infraCapexPerTruck) : "—"}</td>
+                          <td className="num" style={{ fontWeight: 700, color: colorForVehicle(v, results.computedVehicles) }}>{inr(v.loadedCapexPerTruckOnRoad)}</td>
+                          <td className="num" style={{ fontWeight: 700 }}>{inrCompact(v.totalFleetUpfrontCapex)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {results.computedVehicles.length > 1 && (
+                <div style={{ marginTop: "32px" }}>
+                  <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>Fleet Comparison Snapshot</h3>
+                  <ResponsiveContainer width="100%" height={360}>
+                    <RadarChart data={results.radarData} outerRadius="75%">
+                      <PolarGrid stroke="var(--border)" />
+                      <PolarAngleAxis dataKey="metric" tick={{ fontSize: 11, fill: "var(--text-dim)" }} />
+                      <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" />
+                      <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      {results.computedVehicles.map((v) => (
+                        <Radar key={v.id} name={v.name} dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} fill={colorForVehicle(v, results.computedVehicles)} fillOpacity={0.15} strokeWidth={2} />
+                      ))}
+                    </RadarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Sub-tab 2: Unit Economics */}
+          {activeResultTab === 'segment' && (
+            <div className="anim-fade">
+              <div style={{ marginBottom: "24px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  <Route size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                  Cost & Estimated Freight Rate by Segment
+                </h3>
+                <div style={{ overflowX: "auto" }}>
+                  <table className="seg-cost-table">
+                    <thead>
+                      <tr>
+                        <th>Segment / Vehicle</th>
+                        {results.computedVehicles.map((v) => (
+                          <th key={v.id} style={{ color: colorForVehicle(v, results.computedVehicles), minWidth: '150px' }}>{v.name}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr style={{ background: "var(--panel-alt)" }}>
+                        <td><strong>Total Loop (Socialized)</strong></td>
+                        {results.computedVehicles.map((v) => (
+                          <td key={v.id} className="num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>
+                            <div style={{ fontWeight: 700 }}>₹{Math.round(v.totalFreightRatePerTonneTrip)} / Ton</div>
+                            <div style={{ fontSize: "11px", fontWeight: 600, marginTop: "2px" }}>₹{v.requiredFreightRatePerTonneKm.toFixed(3)} / Ton-km</div>
+                          </td>
+                        ))}
+                      </tr>
+                      {routeSegments.map((seg, segIdx) => (
+                        <tr key={seg.id}>
+                          <td>{seg.from} → {seg.to} <span style={{ color: "var(--text-dim)", display: "block", fontSize: "11px", marginTop: "2px" }}>({seg.distance} km)</span></td>
+                          {results.computedVehicles.map((v) => {
+                            const segData = v.segmentCostPerTonneKm[segIdx];
+                            if (!segData || segData.freightRatePerTonneSeg === null) return <td key={v.id} className="num" style={{ color: "var(--text-dim)" }}>— <span style={{ fontSize: "10.5px" }}>(Empty payload)</span></td>;
+                            return (
+                              <td key={v.id} className="num">
+                                <div style={{ fontWeight: 600, color: "var(--text)" }}>₹{Math.round(segData.freightRatePerTonneSeg)} / Ton</div>
+                                <div style={{ fontSize: "11px", color: "var(--text)", marginTop: "2px" }}>₹{segData.freightRatePerTonneKmSeg.toFixed(3)} / Ton-km</div>
+                                <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "4px" }}>Base cost: ₹{Math.round(segData.costPerTonneSeg)}/t</div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div style={{ marginTop: "32px", marginBottom: "32px" }}>
+                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                   <BarChart3 size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                   Estimated Segment Freight Rates (₹/Ton)
+                 </h3>
+                 <ResponsiveContainer width="100%" height={320}>
+                   <BarChart data={results.segmentFreightData} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
+                     <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                     <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} />
+                     <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => `₹${v}`} />
+                     <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `₹${Math.round(v)}/Ton`} />
+                     <Legend wrapperStyle={{ fontSize: 12 }} />
+                     {results.computedVehicles.map((v) => (
+                       <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)} radius={[4, 4, 0, 0]} />
+                     ))}
+                   </BarChart>
+                 </ResponsiveContainer>
+              </div>
+
+              <div style={{ marginTop: "32px", marginBottom: "32px" }}>
+                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                   <Clock size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                   Time Allocation Breakdown (% of Trip Cycle)
+                 </h3>
+                 <ResponsiveContainer width="100%" height={150}>
+                   <BarChart layout="vertical" data={results.timeUtilizationData} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
+                     <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" horizontal={false} />
+                     <XAxis type="number" domain={[0, 100]} stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => `${v}%`} />
+                     <YAxis dataKey="name" type="category" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} width={120} />
+                     <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `${Number(v).toFixed(1)}%`} />
+                     <Legend wrapperStyle={{ fontSize: 12 }} />
+                     <Bar dataKey="Driving" stackId="a" fill="var(--bev)" />
+                     <Bar dataKey="Load/Unload" stackId="a" fill="#8b5cf6" />
+                     <Bar dataKey="Refuel / Charge" stackId="a" fill="#ef4444" />
+                     <Bar dataKey="Rest/Queue" stackId="a" fill="#6b7280" />
+                   </BarChart>
+                 </ResponsiveContainer>
               </div>
             </div>
           )}
 
-          <div style={{ marginBottom: "24px" }} className="grid-auto-fit">
-            {results.computedVehicles.map((v, idx) => {
-              if (v.type !== "electric") return null;
-              return (
-                <div key={v.id} className="kpi-card" style={{ background: "var(--panel)", borderLeft: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
-                  <div className="kpi-label">{v.name} Battery Sizing & Lifecycle</div>
+          {/* Sub-tab 3: Timeline & Breakdown */}
+          {activeResultTab === 'timeline' && (
+            <div className="anim-fade">
+              <div style={{ marginTop: "16px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  NPV Cost Accrual Over Project Horizon ({results.years} Years)
+                </h3>
+                <ResponsiveContainer width="100%" height={340}>
+                  <LineChart data={results.chartData} margin={{ top: 10, right: 30, left: 10, bottom: 25 }}>
+                    <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                    <XAxis dataKey="year" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} />
+                    <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => inrCompact(v)} width={80} />
+                    <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {results.computedVehicles.map((v) => (
+                      <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.5} dot={{ r: 3 }} />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
 
-                  <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "12px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Max Theoretical Range (100% SOH):</span>
-                      <strong className="num" style={{ fontSize: "12px" }}>{Math.round(v.maxTheoreticalRange)} km</strong>
+              <div style={{ marginTop: "32px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  NPV Cost Category Breakdown Comparison
+                </h3>
+                <ResponsiveContainer width="100%" height={380}>
+                  <BarChart
+                    data={[
+                      { category: "Capital & Infra", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.upfront }), {}) },
+                      { category: "Fuel/Energy", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.fuelOrEnergy }), {}) },
+                      { category: "EMI/Debt", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.emi }), {}) },
+                      { category: "Maint & Ins", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.maintenance + v.breakdown.insurance }), {}) },
+                      { category: "Wages & Drivers", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.wages }), {}) },
+                      { category: "Operator Margin", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.operatorMargin }), {}) },
+                      { category: "Tolls & Tyres", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.tolls + v.breakdown.tyres }), {}) },
+                      { category: "Battery Swaps", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.batteryReplacements }), {}) },
+                      { category: "Depot Upkeep", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.infraMaintenance }), {}) },
+                      { category: "Misc", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.misc }), {}) }
+                    ]}
+                    margin={{ top: 20, right: 30, left: 10, bottom: 70 }}
+                  >
+                    <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                    <XAxis dataKey="category" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} interval={0} angle={-35} textAnchor="end" height={70} />
+                    <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => inrCompact(v)} width={80} />
+                    <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => inr(v)} />
+                    <Legend wrapperStyle={{ fontSize: 12, top: 0 }} />
+                    {results.computedVehicles.map((v, idx) => (
+                      <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)}>
+                         {idx > 0 && <LabelList dataKey={v.name} content={(props) => renderCustomBarLabel(props)} />}
+                      </Bar>
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+
+              <div style={{ marginTop: "32px", marginBottom: "16px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  <PieChartIcon size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                  Cost Breakdown Split (Per Vehicle)
+                </h3>
+                <div className="grid-auto-fit">
+                  {results.computedVehicles.map((v) => {
+                    const pieDataRaw = [
+                      { name: "Capital & Infra", value: v.breakdown.upfront }, { name: "Fuel/Energy", value: v.breakdown.fuelOrEnergy },
+                      { name: "EMI/Debt", value: v.breakdown.emi }, { name: "Maintenance & Ins", value: v.breakdown.maintenance + v.breakdown.insurance },
+                      { name: "Wages & Drivers", value: v.breakdown.wages }, { name: "Tolls & Tyres", value: v.breakdown.tolls + v.breakdown.tyres },
+                      { name: "Battery Replacements", value: v.breakdown.batteryReplacements }, { name: "Depot Upkeep", value: v.breakdown.infraMaintenance },
+                      { name: "Misc Overheads", value: v.breakdown.misc }, { name: "Operator Margin", value: v.breakdown.operatorMargin }
+                    ].filter(d => d.value > 0);
+                    const totalValue = pieDataRaw.reduce((acc, d) => acc + d.value, 0);
+                    
+                    return (
+                      <div key={v.id} className="kpi-card pie-chart-container" style={{ borderLeft: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
+                        <div className="kpi-label" style={{ marginBottom: "16px", alignSelf: "flex-start" }}>{v.name} Total TCO Split</div>
+                        <ResponsiveContainer width="100%" height={240}>
+                          <PieChart>
+                            <Pie data={pieDataRaw} cx="50%" cy="50%" innerRadius={65} outerRadius={95} paddingAngle={2} dataKey="value">
+                              {pieDataRaw.map((entry, index) => <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />)}
+                            </Pie>
+                            <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "12px", borderRadius: "8px" }} formatter={(value, name) => [inr(value), name]} />
+                          </PieChart>
+                        </ResponsiveContainer>
+                        <div className="pie-legend">
+                          {pieDataRaw.map((entry, index) => {
+                            const pct = ((entry.value / totalValue) * 100).toFixed(1);
+                            return (
+                              <div key={index} className="pie-legend-item">
+                                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: PIE_COLORS[index % PIE_COLORS.length] }}></span>
+                                <span>{entry.name} ({pct}%)</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Sub-tab 4: EV Infrastructure */}
+          {activeResultTab === 'battery' && (
+            <div className="anim-fade">
+              {!results.computedVehicles.some(v => v.type === "electric") ? (
+                <div style={{ padding: "40px", textAlign: "center", color: "var(--text-dim)", fontStyle: "italic" }}>
+                  No Electric Vehicles are currently configured in the fleet to analyze infrastructure for.
+                </div>
+              ) : (
+                <>
+                  <div style={{ background: "var(--panel-alt)", padding: "18px", borderRadius: "10px", marginBottom: "24px", border: "1px solid var(--border)" }}>
+                    <div className="kpi-label" style={{ color: "var(--bev)" }}>
+                      <BatteryCharging size={16} style={{ marginRight: 6 }} /> Charging Sequence Trace
                     </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Operational Range at Start (100% SOH):</span>
-                      <strong className="num badge badge-info" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtStart)} km</strong>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Operational Range at SOH Limit:</span>
-                      <strong className="num badge badge-warn" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtSOHLimit)} km</strong>
-                    </div>
-                    <hr style={{ border: 0, borderBottom: "1px solid var(--border)", margin: "4px 0" }} />
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Critical physical range SOH:</span>
-                      <strong className="num" style={{ fontSize: "12px" }}>{v.criticalSOHLimit.toFixed(1)}% SOH</strong>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Resolved SOH replacement trigger:</span>
-                      <strong className="num" style={{ fontSize: "12px", fontWeight: "bold", color: "var(--bad)" }}>{v.resolvedSOHReplacementLimit.toFixed(1)}% SOH</strong>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Analysis end SOH (Year {results.years}):</span>
-                      <strong className="num" style={{ fontSize: "12px" }}>{v.currentSOH.toFixed(1)}%</strong>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Swaps Completed (Per Vehicle):</span>
-                      <strong className="num" style={{ fontSize: "12px", fontWeight: "bold", color: "var(--bev)" }}>{v.replacementsPerVehicle} Swaps</strong>
-                    </div>
-                    <div style={{ display: "flex", justifyContent: "space-between" }}>
-                      <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Total Fleet Battery Swaps:</span>
-                      <strong className="num" style={{ fontSize: "12px" }}>{v.batterySetsReplacedCount} Packs</strong>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: "20px", marginTop: "12px" }}>
+                      {results.computedVehicles.map((v) => {
+                        if (v.type !== "electric") return null;
+                        return (
+                          <div key={v.id} style={{ flex: 1, minWidth: "300px" }}>
+                            <strong style={{ fontSize: "13px", display: "block", marginBottom: "4px" }}>{v.name} Charge Event Sequence:</strong>
+                            <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "8px" }}>
+                              * Simulates worst-case at End-of-Life SOH ({v.resolvedSOHReplacementLimit.toFixed(1)}%)
+                            </div>
+                            {v.stopsLog.length === 0 ? (
+                              <div style={{ fontSize: "12.5px", color: "var(--text-dim)" }}>No charging stops required for route loop.</div>
+                            ) : (
+                              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                                {v.stopsLog.map((log, lIdx) => (
+                                  <div key={lIdx} style={{ fontSize: "12px", background: "var(--panel)", padding: "10px", borderRadius: "8px", borderLeft: "3px solid var(--bev)" }}>
+                                    <strong>Stop {lIdx + 1}: {log.label}</strong> (at {log.km} km)<br />
+                                    <div style={{ color: "var(--text-dim)", marginTop: "4px" }}>
+                                      Leg Energy: <span className="num">{Math.round(log.energyLegConsumed)} kWh</span> |
+                                      SoC: <span className="num">{log.socBefore}%</span> → <span className="num">{log.socAfter}%</span> |
+                                      Time: <span className="num">{(log.chargeTimeHrs * 60).toFixed(0)} min</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
 
-                  {v.batteryReplacementLog.length > 0 ? (
-                    <div style={{ marginTop: "12px", fontSize: "11px", background: "var(--panel-alt)", padding: "10px", borderRadius: "8px", border: "1px dashed var(--border)" }}>
-                      <strong>Pack Replacement Schedule:</strong>
-                      <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginTop: "6px" }}>
-                        {v.batteryReplacementLog.map((log, rIdx) => (
-                          <div key={rIdx} style={{ display: "flex", justifyContent: "space-between", color: "var(--text-dim)" }}>
-                            <span>Swap #{rIdx + 1}: Year {log.year}</span>
-                            <span>{log.sohAtReplacement.toFixed(1)}% SOH ({log.cycles} cycles)</span>
+                  <div style={{ marginBottom: "24px" }} className="grid-auto-fit">
+                    {results.computedVehicles.map((v) => {
+                      if (v.type !== "electric") return null;
+                      return (
+                        <div key={v.id} className="kpi-card" style={{ background: "var(--panel)", borderLeft: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
+                          <div className="kpi-label">{v.name} Battery Sizing & Lifecycle</div>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "12px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Theoretical Range (100% SOH):</span><strong className="num" style={{ fontSize: "12px" }}>{Math.round(v.maxTheoreticalRange)} km</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at Start (100% SOH):</span><strong className="num badge badge-info" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtStart)} km</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at SOH Limit:</span><strong className="num badge badge-warn" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtSOHLimit)} km</strong></div>
+                            <hr style={{ border: 0, borderBottom: "1px solid var(--border)", margin: "4px 0" }} />
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Critical physical range SOH:</span><strong className="num" style={{ fontSize: "12px" }}>{v.criticalSOHLimit.toFixed(1)}% SOH</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Resolved SOH limit:</span><strong className="num" style={{ fontSize: "12px", fontWeight: "bold", color: "var(--bad)" }}>{v.resolvedSOHReplacementLimit.toFixed(1)}% SOH</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Analysis end SOH (Year {results.years}):</span><strong className="num" style={{ fontSize: "12px" }}>{v.currentSOH.toFixed(1)}%</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Swaps Completed (Per Vehicle):</span><strong className="num" style={{ fontSize: "12px", fontWeight: "bold", color: "var(--bev)" }}>{v.replacementsPerVehicle} Swaps</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Total Fleet Battery Swaps:</span><strong className="num" style={{ fontSize: "12px" }}>{v.batterySetsReplacedCount} Packs</strong></div>
                           </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ marginTop: "12px", fontSize: "11px", color: "var(--text-dim)", fontStyle: "italic" }}>
-                      No battery pack replacements occurred during the {results.years}-year project lifecycle.
-                    </div>
-                  )}
-
-                  {v.sohTimeline.length > 1 && (
-                    <div style={{ marginTop: "14px" }}>
-                      <div style={{ fontSize: "10.5px", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>SOH over analysis window</div>
-                      <ResponsiveContainer width="100%" height={90}>
-                        <LineChart data={v.sohTimeline} margin={{ top: 4, right: 8, left: -24, bottom: 0 }}>
-                          <XAxis dataKey="year" tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" />
-                          <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" width={30} />
-                          <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val}%`} labelFormatter={(y) => `Year ${y}`} />
-                          <Line type="stepAfter" dataKey="soh" stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2} dot={false} />
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-
-          {results.computedVehicles.some(v => v.type === "electric") && (
-            <div style={{ background: "var(--panel-alt)", padding: "18px", borderRadius: "10px", marginBottom: "24px", border: "1px solid var(--border)" }}>
-              <div className="kpi-label" style={{ color: "var(--bev)" }}>
-                <PlugZap size={16} style={{ marginRight: 6 }} /> Charging Station Sizing (1 Station per Stop, Variable Chargers)
-              </div>
-              <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "6px", lineHeight: 1.5 }}>
-                The calculator sizes each stop automatically. Use the override controls below to rename any stop or manually set its number of high-speed chargers.
-                Manual charger values replace the calculated requirement and flow through infrastructure CAPEX, charger maintenance, total charger count, and TCO.
-              </div>
-              <div style={{ overflowX: "auto", marginTop: "12px" }}>
-                <table className="route-table" style={{ background: "var(--panel)", borderRadius: "8px" }}>
-                  <thead>
-                    <tr>
-                      <th>Stop Location</th>
-                      <th style={{ textAlign: "right" }}>Cumulative Milepost (km)</th>
-                      <th style={{ textAlign: "center" }}>Infrastructure Type</th>
-                      <th style={{ textAlign: "center" }}>Dedicated Stations</th>
-                      <th style={{ textAlign: "center" }}>Auto-Sized Chargers</th>
-                      <th style={{ textAlign: "center" }}>Override Chargers</th>
-                      <th style={{ textAlign: "center" }}>Manual Stop Name</th>
-                      <th style={{ textAlign: "right" }}>Cost Profile (Ex-Subsidy)</th>
-                      <th style={{ textAlign: "center" }}>Reset</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {results.computedVehicles.flatMap(v => {
-                      if (v.type !== "electric") return [];
-                      return v.uniqueStationsList.map((st, sIdx) => {
-                        const override = chargingStationOverrides[v.id]?.[st.key] || {};
-                        const hasChargerOverride = Number.isFinite(override.chargers);
-                        const effectiveChargers = st.chargersSized;
-                        const belowAuto = hasChargerOverride && effectiveChargers < st.autoChargersSized;
-
-                        return (
-                          <tr key={`${v.id}_s_${sIdx}`}>
-                            <td>
-                              <strong>{v.name}</strong> - {st.label}
-                              {(st.isManualNameOverride || st.isManualChargerOverride) && (
-                                <div style={{ fontSize: "10px", color: "var(--bev)", marginTop: "3px" }}>
-                                  Manual override active
-                                </div>
-                              )}
-                            </td>
-                            <td className="num" style={{ textAlign: "right" }}>{st.km} km</td>
-                            <td style={{ textAlign: "center" }}>
-                              <span className={`badge ${st.isDepot ? "badge-info" : "badge-warn"}`}>
-                                {st.isDepot ? "Terminal Depot" : "Highway charger"}
-                              </span>
-                            </td>
-                            <td className="num" style={{ textAlign: "center" }}>1 Station</td>
-                            <td className="num" style={{ textAlign: "center" }}>
-                              {st.autoChargersSized} High-Speed Plugs
-                            </td>
-                            <td style={{ minWidth: "145px" }}>
-                              <div className="field-input" style={{ width: "135px", margin: "0 auto" }}>
-                                <input
-                                  type="number"
-                                  min="1"
-                                  step="1"
-                                  value={hasChargerOverride ? override.chargers : st.autoChargersSized}
-                                  onChange={(e) => {
-                                    const value = Math.max(1, Math.round(parseFloat(e.target.value) || 1));
-                                    updateChargingStationOverride(v.id, st.key, "chargers", value);
-                                  }}
-                                  style={{ width: "90px" }}
-                                />
-                                <span className="field-suffix">plugs</span>
+                          {v.batteryReplacementLog.length > 0 ? (
+                            <div style={{ marginTop: "12px", fontSize: "11px", background: "var(--panel-alt)", padding: "10px", borderRadius: "8px", border: "1px dashed var(--border)" }}>
+                              <strong>Pack Replacement Schedule:</strong>
+                              <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginTop: "6px" }}>
+                                {v.batteryReplacementLog.map((log, rIdx) => (
+                                  <div key={rIdx} style={{ display: "flex", justifyContent: "space-between", color: "var(--text-dim)" }}><span>Swap #{rIdx + 1}: Year {log.year}</span><span>{log.sohAtReplacement.toFixed(1)}% SOH ({log.cycles} cycles)</span></div>
+                                ))}
                               </div>
-                              {belowAuto && (
-                                <div style={{ fontSize: "9.5px", color: "var(--bad)", textAlign: "center", marginTop: "3px" }}>
-                                  Below calculated need
-                                </div>
-                              )}
-                            </td>
-                            <td style={{ minWidth: "190px" }}>
-                              <div className="field-input" style={{ width: "180px", margin: "0 auto" }}>
-                                <input
-                                  type="text"
-                                  value={typeof override.name === "string" ? override.name : ""}
-                                  placeholder={st.originalLabel}
-                                  onChange={(e) => updateChargingStationOverride(v.id, st.key, "name", e.target.value)}
-                                  style={{ width: "165px", textAlign: "left" }}
-                                />
-                              </div>
-                            </td>
-                            <td className="num" style={{ textAlign: "right" }}>
-                              {inr(st.stationSetupCost + st.chargersCostSum)}
-                            </td>
-                            <td style={{ textAlign: "center" }}>
-                              {(st.isManualNameOverride || st.isManualChargerOverride) ? (
-                                <button
-                                  className="reset-btn"
-                                  type="button"
-                                  title="Reset this stop to automatic sizing/name"
-                                  onClick={() => resetChargingStationOverride(v.id, st.key)}
-                                  style={{ padding: "6px 8px", margin: "0 auto" }}
-                                >
-                                  <RotateCcw size={13} />
-                                </button>
-                              ) : (
-                                <span style={{ color: "var(--text-dim)", fontSize: "11px" }}>Auto</span>
-                              )}
-                            </td>
-                          </tr>
-                        );
-                      });
+                            </div>
+                          ) : (
+                            <div style={{ marginTop: "12px", fontSize: "11px", color: "var(--text-dim)", fontStyle: "italic" }}>No battery replacements during lifecycle.</div>
+                          )}
+                          {v.sohTimeline.length > 1 && (
+                            <div style={{ marginTop: "14px" }}>
+                              <div style={{ fontSize: "10.5px", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>SOH over analysis window</div>
+                              <ResponsiveContainer width="100%" height={90}>
+                                <LineChart data={v.sohTimeline} margin={{ top: 4, right: 8, left: -24, bottom: 0 }}>
+                                  <XAxis dataKey="year" tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" />
+                                  <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" width={30} />
+                                  <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val}%`} labelFormatter={(y) => `Year ${y}`} />
+                                  <Line type="stepAfter" dataKey="soh" stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2} dot={false} />
+                                </LineChart>
+                              </ResponsiveContainer>
+                            </div>
+                          )}
+                        </div>
+                      );
                     })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
+                  </div>
 
+                  <div style={{ background: "var(--panel-alt)", padding: "18px", borderRadius: "10px", marginBottom: "24px", border: "1px solid var(--border)" }}>
+                    <div className="kpi-label" style={{ color: "var(--bev)" }}>
+                      <PlugZap size={16} style={{ marginRight: 6 }} /> Charging Station Sizing
+                    </div>
+                    <div style={{ overflowX: "auto", marginTop: "12px" }}>
+                      <table className="route-table" style={{ background: "var(--panel)", borderRadius: "8px" }}>
+                        <thead>
+                          <tr>
+                            <th>Stop Location</th><th style={{ textAlign: "right" }}>Cumulative Milepost</th><th style={{ textAlign: "center" }}>Infrastructure Type</th>
+                            <th style={{ textAlign: "center" }}>Auto-Sized Chargers</th><th style={{ textAlign: "center" }}>Override Chargers</th>
+                            <th style={{ textAlign: "center" }}>Manual Stop Name</th><th style={{ textAlign: "right" }}>Cost Profile</th><th style={{ textAlign: "center" }}>Reset</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {results.computedVehicles.flatMap(v => {
+                            if (v.type !== "electric") return [];
+                            return v.uniqueStationsList.map((st, sIdx) => {
+                              const override = chargingStationOverrides[v.id]?.[st.key] || {};
+                              const hasChargerOverride = Number.isFinite(override.chargers);
+                              const effectiveChargers = st.chargersSized;
+                              const belowAuto = hasChargerOverride && effectiveChargers < st.autoChargersSized;
 
-          {results.computedVehicles.length > 1 && (
-            <div style={{ marginTop: "32px" }}>
-              <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-                Fleet Comparison Snapshot
-              </h3>
-              <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "8px" }}>
-                Each axis is scored relative to the best vehicle on that metric (100 = best in this fleet, not an absolute scale) — useful for seeing each vehicle's relative strengths and weaknesses at a glance.
-              </div>
-              <ResponsiveContainer width="100%" height={360}>
-                <RadarChart data={results.radarData} outerRadius="75%">
-                  <PolarGrid stroke="var(--border)" />
-                  <PolarAngleAxis dataKey="metric" tick={{ fontSize: 11, fill: "var(--text-dim)" }} />
-                  <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" />
-                  <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} />
-                  <Legend wrapperStyle={{ fontSize: 12 }} />
-                  {results.computedVehicles.map((v) => (
-                    <Radar key={v.id} name={v.name} dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} fill={colorForVehicle(v, results.computedVehicles)} fillOpacity={0.15} strokeWidth={2} />
-                  ))}
-                </RadarChart>
-              </ResponsiveContainer>
+                              return (
+                                <tr key={`${v.id}_s_${sIdx}`}>
+                                  <td><strong>{v.name}</strong> - {st.label} {(st.isManualNameOverride || st.isManualChargerOverride) && (<div style={{ fontSize: "10px", color: "var(--bev)", marginTop: "3px" }}>Manual override active</div>)}</td>
+                                  <td className="num" style={{ textAlign: "right" }}>{st.km} km</td>
+                                  <td style={{ textAlign: "center" }}><span className={`badge ${st.isDepot ? "badge-info" : "badge-warn"}`}>{st.isDepot ? "Terminal Depot" : "Highway charger"}</span></td>
+                                  <td className="num" style={{ textAlign: "center" }}>{st.autoChargersSized} Plugs</td>
+                                  <td style={{ minWidth: "145px" }}>
+                                    <div className="field-input" style={{ width: "135px", margin: "0 auto" }}>
+                                      <input type="number" min="1" step="1" value={hasChargerOverride ? override.chargers : st.autoChargersSized} onChange={(e) => { updateChargingStationOverride(v.id, st.key, "chargers", Math.max(1, Math.round(parseFloat(e.target.value) || 1))); }} style={{ width: "90px" }} />
+                                      <span className="field-suffix">plugs</span>
+                                    </div>
+                                    {belowAuto && <div style={{ fontSize: "9.5px", color: "var(--bad)", textAlign: "center", marginTop: "3px" }}>Below calculated need</div>}
+                                  </td>
+                                  <td style={{ minWidth: "190px" }}>
+                                    <div className="field-input" style={{ width: "180px", margin: "0 auto" }}>
+                                      <input type="text" value={typeof override.name === "string" ? override.name : ""} placeholder={st.originalLabel} onChange={(e) => updateChargingStationOverride(v.id, st.key, "name", e.target.value)} style={{ width: "165px", textAlign: "left" }} />
+                                    </div>
+                                  </td>
+                                  <td className="num" style={{ textAlign: "right" }}>{inr(st.stationSetupCost + st.chargersCostSum)}</td>
+                                  <td style={{ textAlign: "center" }}>
+                                    {(st.isManualNameOverride || st.isManualChargerOverride) ? (
+                                      <button className="reset-btn" type="button" onClick={() => resetChargingStationOverride(v.id, st.key)} style={{ padding: "6px 8px", margin: "0 auto" }}><RotateCcw size={13} /></button>
+                                    ) : (<span style={{ color: "var(--text-dim)", fontSize: "11px" }}>Auto</span>)}
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
 
         </div>
-      </div>
+      )}
+
     </div>
   );
 }
@@ -2384,13 +2059,7 @@ function TextField({ label, value, onChange, placeholder }) {
     <div className="field">
       <span className="field-label">{label}</span>
       <div className="field-input" style={{ flex: 1.2 }}>
-        <input
-          type="text"
-          value={value || ""}
-          placeholder={placeholder}
-          onChange={(e) => onChange(e.target.value)}
-          style={{ width: "100%", textAlign: "left" }}
-        />
+        <input type="text" value={value || ""} placeholder={placeholder} onChange={(e) => onChange(e.target.value)} style={{ width: "100%", textAlign: "left" }} />
       </div>
     </div>
   );
