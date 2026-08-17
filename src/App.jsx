@@ -1,9 +1,8 @@
 import React, { useState, useMemo } from "react";
 import {
   Truck, Zap, Fuel, BatteryCharging, TrendingUp,
-  Package, Info, RotateCcw, PlugZap,
-  Plus, Trash2, MapPin, Settings, Sun, Moon, AlertTriangle, CheckCircle2,
-  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon, Target, Activity
+  RotateCcw, PlugZap, Plus, Trash2, MapPin, Settings, Sun, Moon, AlertTriangle, CheckCircle2,
+  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon, Target, Activity, Battery, Users, ToggleLeft, ToggleRight
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -73,7 +72,18 @@ const ROAD_TYPES = ["6 lane highway/Expressway", "4 lane highway", "2 lane state
 const TRAFFIC_CONDITIONS = ["High", "Medium", "Low"];
 const PAYLOAD_KEYS = [0, 20, 40, 60];
 
-const PIE_COLORS = ['#38bdf8', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#64748b', '#14b8a6', '#f97316', '#8b5cf6'];
+const PIE_COLOR_MAP = {
+  "Capital & Infra": "#38bdf8",
+  "Fuel/Energy": "#10b981",
+  "EMI/Debt": "#f59e0b",
+  "Maintenance & Ins": "#ef4444",
+  "Wages & Drivers": "#8b5cf6",
+  "Tolls & Tyres": "#ec4899",
+  "Battery Replacements": "#64748b",
+  "Depot Upkeep": "#14b8a6",
+  "Misc Overheads": "#f97316",
+  "Operator Margin": "#a855f7"
+};
 
 function interpolateEfficiency(roadType, traffic, payload, vehicleType, dieselMatrix, evMatrix) {
   const activeMatrix = vehicleType === "electric" ? evMatrix : dieselMatrix;
@@ -175,23 +185,24 @@ const INITIAL_VEHICLES = [
     interestRate: 10.0, loanTenure: 7, driverSalaryMonthly: 45000, driversPerVehicle: 2, tollCostPerTrip: 7350,
     tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000, tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
     tyresTrailer: 12, tyreCostTrailer: 22000, tyreLifeTrailer: 65000, scheduledDowntimeDays: 12, unscheduledDowntimeHrs: 48,
-    safeSoCThreshold: 10, stationCost: 7000000, stationMaintenance: 500000, chargerCost: 2250000, chargerMaintenance: 200000,
-    infrastructureTaxCredit: 0, chargeSpeedKW: 225, chargingTimeMarginPct: 10, electricityRate: 5, depotLandLeaseMonthly: 250000,
-    depotDemandChargesMonthly: 80000, useDynamicSOHLimit: true, driverRestDelayFactorKm: 200, miscCostPerMonth: 10000, miscCostNotes: "Chai/Paani", operatorMarginPerTruckMonthly: 25000,
+    safeSoCThreshold: 10, stationCost: 2500000, chargerCost: 1500000, defaultChargersPerStation: 5,
+    infrastructureTaxCredit: 0, chargeSpeedKW: 225, chargingTimeMarginPct: 10, electricityRate: 5, depotLandLeaseMonthly: 0,
+    costPerManpower: 25000, opsInchargeCount: 2, opsInchargeCost: 70000, supportingManpowerCount: 6, supportingManpowerCost: 40000,
+    useDynamicSOHLimit: true, driverRestDelayFactorKm: 200, miscCostPerMonth: 10000, miscCostNotes: "Chai/Paani", operatorMarginPerTruckMonthly: 25000,
   }
 ];
 
 // ---------------------------------------------------------------------------
-// CORE PER-VEHICLE ENGINE
+// CORE ENGINE
 // ---------------------------------------------------------------------------
 function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, dieselMatrix, evMatrix) {
   const {
-    years, dfRate, escGen, escF, escE, escW, escI,
+    years, dfRate,
+    escF, escE, escAMC, escToll, escTyre, escMisc, escIns, escW, escLand,
     workingDaysPerMonth, loadingUnloadingTimePerTrip
   } = cfg;
   
   const dailyOperatingLimitHrs = 24;
-
   const payloadCap = getPayloadCap(v);
   let tripMaxPayload = 0;
   let totalTripDistance = 0;
@@ -255,7 +266,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     let currentSoC = 100;
     let cumulativeDistance = 0;
     let currentEnergySinceCharge = 0;
-    let previousChargeKm = 0;
     let lastChargedFromSoC = 100;
 
     const designSOHLimit = v.batterySOHThreshold || 75;
@@ -268,15 +278,16 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
 
       chargingDowntimeHrs += finalChargeTimeHrs;
 
+      const uniqueKey = `${label}_${Math.round(km)}`;
       stopsLog.push({
-        label, km: Math.round(km), socBefore: socBefore.toFixed(1), socAfter: chargeToSoC, isDepot,
+        key: uniqueKey, label, km: Math.round(km), socBefore: socBefore.toFixed(1), socAfter: chargeToSoC, isDepot,
         energyLegConsumed: currentEnergySinceCharge, startSoCWindow: lastChargedFromSoC, chargeTimeHrs: finalChargeTimeHrs
       });
 
-      const uniqueKey = `${label}_${Math.round(km)}`;
       if (!uniqueChargingStopsMap[uniqueKey]) {
         uniqueChargingStopsMap[uniqueKey] = {
-          key: uniqueKey, label, km: Math.round(km), isDepot, chargesPerLoop: 0, timePerChargeHrs: finalChargeTimeHrs
+          key: uniqueKey, label, km: Math.round(km), isDepot, chargesPerLoop: 0, timePerChargeHrs: finalChargeTimeHrs,
+          energyReplenishedKWh
         };
       }
       uniqueChargingStopsMap[uniqueKey].chargesPerLoop += 1;
@@ -289,7 +300,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
       if (reqSOHPercent > criticalSOHLimit) criticalSOHLimit = Math.min(100, Math.max(criticalSOHLimit, reqSOHPercent));
 
       currentEnergySinceCharge = 0;
-      previousChargeKm = km;
       lastChargedFromSoC = chargeToSoC;
     };
 
@@ -300,7 +310,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
       const socPctPerKm = 100 / (safeEconomy * safeCapacity);
 
       let remainingSegDistance = seg.distance;
-      let distanceIntoSegment = 0;
 
       while (remainingSegDistance > 0.001) {
         const availableSoC = currentSoC - v.safeSoCThreshold;
@@ -311,7 +320,6 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
           currentEnergySinceCharge += energyConsumed;
           currentSoC -= remainingSegDistance * socPctPerKm;
           cumulativeDistance += remainingSegDistance;
-          distanceIntoSegment += remainingSegDistance;
           remainingSegDistance = 0;
         } else {
           const travelDist = maxDistanceBeforeCharge;
@@ -321,10 +329,9 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
           currentEnergySinceCharge += energyConsumed;
           currentSoC -= travelDist * socPctPerKm;
           cumulativeDistance += travelDist;
-          distanceIntoSegment += travelDist;
           remainingSegDistance -= travelDist;
 
-          recordChargeStop(`Mid-Segment Fast Charger (${seg.from} \u2192 ${seg.to})`, cumulativeDistance, currentSoC, 100, false);
+          recordChargeStop(`Mid-Segment Fast Charger (${seg.from} → ${seg.to})`, cumulativeDistance, currentSoC, 100, false);
           currentSoC = 100;
         }
       }
@@ -383,12 +390,16 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   const annualTonneKmPerVehicle = tripsPerYearPerVehicle * tonneKmPerTrip;
   const annualTonneKmFleet = annualTonneKmPerVehicle * fleetSizeRequired;
 
+  // -------------------------------------------------------------------------
+  // CHARGING STATION SIZING & CAPEX CALCULATION
+  // -------------------------------------------------------------------------
   let uniqueStationsCount = 0;
   let totalChargersNeeded = 0;
   let capitalSetupInfra = 0;
   let uniqueStationsList = [];
 
   if (v.type === "electric") {
+    const defaultBaselinePlugs = v.defaultChargersPerStation || 5;
     const STATION_DAILY_UPTIME_HRS = 22;
     const dailyLoopsAcrossFleet = totalTripsAcrossFleetYear / (workingDaysPerMonth * 12);
 
@@ -396,7 +407,9 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
       const rawStop = uniqueChargingStopsMap[key];
       const chargeSlotsPerDayPerCharger = STATION_DAILY_UPTIME_HRS / Math.max(0.1, rawStop.timePerChargeHrs);
       const dailyChargesAtThisLocation = dailyLoopsAcrossFleet * rawStop.chargesPerLoop;
-      const autoChargersSized = Math.max(1, Math.ceil(dailyChargesAtThisLocation / chargeSlotsPerDayPerCharger));
+      const autoCalculatedDemandPlugs = Math.max(1, Math.ceil(dailyChargesAtThisLocation / chargeSlotsPerDayPerCharger));
+      
+      const autoChargersSized = Math.max(defaultBaselinePlugs, autoCalculatedDemandPlugs);
 
       const stopOverride = chargingStationOverrides[v.id]?.[key] || {};
       const hasChargerOverride = Number.isFinite(stopOverride.chargers);
@@ -412,9 +425,20 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
         stationSetupCost: v.stationCost, chargersCostSum: chargersSized * v.chargerCost
       });
 
-      capitalSetupInfra += (v.stationCost + (chargersSized * v.chargerCost)) * (1 - v.infrastructureTaxCredit / 100);
+      capitalSetupInfra += (v.stationCost + (chargersSized * v.chargerCost)) * (1 - (v.infrastructureTaxCredit || 0) / 100);
     });
   }
+
+  const autoStationManpower = v.type === "electric" 
+    ? Math.max(0, (uniqueStationsCount > 2 ? (uniqueStationsCount - 2) * 3 : uniqueStationsCount * 3))
+    : 0;
+  const costPerManpower = v.costPerManpower || 25000;
+  const opsInchargeCount = v.opsInchargeCount !== undefined ? v.opsInchargeCount : 2;
+  const opsInchargeCost = v.opsInchargeCost || 70000;
+  const supportingManpowerCount = v.supportingManpowerCount !== undefined ? v.supportingManpowerCount : 6;
+  const supportingManpowerCost = v.supportingManpowerCost || 40000;
+
+  const totalMonthlyStationManpower = (autoStationManpower * costPerManpower) + (opsInchargeCount * opsInchargeCost) + (supportingManpowerCount * supportingManpowerCost);
 
   const vehicleCostBeforeGSTAddOns = v.purchasePrice * (1 + v.gstRate / 100);
   const totalUpfrontGSTPrice = vehicleCostBeforeGSTAddOns + (v.registrationFee || 0) + (v.trailerCost || 0) + (v.vehicleMiscCost || 0);
@@ -439,39 +463,49 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   const loadedCapexPerTruckEquity = loanUpfrontDownpayment + infraCapexPerTruck;
   const totalFleetOnRoadCapex = (totalUpfrontGSTPrice * fleetSizeRequired) + capitalSetupInfra;
 
-  const breakdown = { upfront: npvTCOSum, fuelOrEnergy: 0, emi: 0, maintenance: 0, insurance: 0, wages: 0, tolls: 0, tyres: 0, batteryReplacements: 0, infraMaintenance: 0, misc: 0, residuals: 0, operatorMargin: 0 };
+  const breakdown = {
+    upfront: npvTCOSum, fuelOrEnergy: 0, emi: 0, maintenance: 0, insurance: 0, wages: 0, tolls: 0, tyres: 0,
+    batteryReplacements: 0, stationManpower: 0, infraLandLease: 0, misc: 0, residuals: 0, operatorMargin: 0
+  };
 
   let currentSOH = 100;
   let mileageSinceLastReplacement = 0;
   let batterySetsReplacedCount = 0;
   let batteryReplacementLog = [];
   let sohTimeline = [];
+  let rangeTimeline = [];
   let npvMarginTarget = 0;
 
+  const baseTheoreticalRange = v.type === "electric" ? v.batteryCapacity * avgRouteEconomy : (v.type === "diesel" ? v.fuelCapacityLitres * avgRouteEconomy : 0);
+  const baseOperationalRangeAtStart = v.type === "electric" ? v.batteryCapacity * ((100 - (v.safeSoCThreshold || 0)) / 100) * avgRouteEconomy : 0;
+
   for (let t = 1; t <= years; t++) {
-    const df = 1 / Math.pow(1 + dfRate, t);
-    const multGen = Math.pow(1 + escGen, t - 1);
+    const df = dfRate > 0 ? 1 / Math.pow(1 + dfRate, t) : 1;
     const multF = Math.pow(1 + escF, t - 1);
     const multE = Math.pow(1 + escE, t - 1);
+    const multAMC = Math.pow(1 + escAMC, t - 1);
+    const multToll = Math.pow(1 + escToll, t - 1);
+    const multTyre = Math.pow(1 + escTyre, t - 1);
+    const multMisc = Math.pow(1 + escMisc, t - 1);
+    const multIns = Math.pow(1 + escIns, t - 1);
     const multW = Math.pow(1 + escW, t - 1);
-    const multI = Math.pow(1 + escI, t - 1);
+    const multLand = Math.pow(1 + escLand, t - 1);
 
     const yearEMI = (v.financing === "emi" && t <= v.loanTenure) ? loanAnnualEMI * fleetSizeRequired : 0;
     const yearFuelOrEnergy = (totalDistanceAcrossFleetYear / avgRouteEconomy) * (v.type === "diesel" ? (v.fuelOrElectricPrice * multF) : (v.electricityRate * multE));
-
-    const yearMaint = totalDistanceAcrossFleetYear * v.maintCostPerKm * multGen;
+    const yearMaint = totalDistanceAcrossFleetYear * v.maintCostPerKm * multAMC;
     const idvFactor = years > 0 ? (1 - ((1 - v.residualPct / 100) * (t - 1) / years)) : 1;
-    const yearIns = totalUpfrontGSTPrice * Math.max(v.residualPct / 100, idvFactor) * (v.insuranceRatePct / 100) * multGen * fleetSizeRequired;
+    const yearIns = totalUpfrontGSTPrice * Math.max(v.residualPct / 100, idvFactor) * (v.insuranceRatePct / 100) * multIns * fleetSizeRequired;
     const yearWages = v.driverSalaryMonthly * 12 * Math.max(1, v.driversPerVehicle || 1) * multW * fleetSizeRequired;
-    const yearTolls = v.tollCostPerTrip * totalTripsAcrossFleetYear * multGen;
-    const yearMisc = (v.miscCostPerMonth || 0) * 12 * multGen * fleetSizeRequired;
-    const yearOperatorMargin = (v.operatorMarginPerTruckMonthly || 0) * 12 * multGen * fleetSizeRequired;
+    const yearTolls = v.tollCostPerTrip * totalTripsAcrossFleetYear * multToll;
+    const yearMisc = (v.miscCostPerMonth || 0) * 12 * multMisc * fleetSizeRequired;
+    const yearOperatorMargin = (v.operatorMarginPerTruckMonthly || 0) * 12 * multMisc * fleetSizeRequired;
 
     const yearTyres = totalDistanceAcrossFleetYear * (
       (v.tyresFront * v.tyreCostFront / Math.max(1, v.tyreLifeFront)) +
       (v.tyresRear * v.tyreCostRear / Math.max(1, v.tyreLifeRear)) +
       (v.tyresTrailer * v.tyreCostTrailer / Math.max(1, v.tyreLifeTrailer))
-    ) * multGen;
+    ) * multTyre;
 
     let yearBatteryCost = 0;
     if (v.type === "electric") {
@@ -484,7 +518,7 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
       while (availableMileage > 0) {
         let mileageToLimit = lifespanKm - mileageSinceLastReplacement;
         if (availableMileage >= mileageToLimit) {
-          yearBatteryCost += v.batteryReplacementCost * fleetSizeRequired * multGen;
+          yearBatteryCost += v.batteryReplacementCost * fleetSizeRequired * multAMC;
           batterySetsReplacedCount += fleetSizeRequired;
           batteryReplacementLog.push({
             year: t, sohAtReplacement: resolvedSOHReplacementLimit, cycles: Math.round(cyclesToFailure), mileageSinceLastReplacement: Math.round(lifespanKm),
@@ -497,15 +531,19 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
         }
       }
       currentSOH = 100 - (mileageSinceLastReplacement / lifespanKm) * (100 - resolvedSOHReplacementLimit);
-      sohTimeline.push({ year: t, soh: Math.round(currentSOH * 10) / 10 });
+      const roundedSOH = Math.round(currentSOH * 10) / 10;
+      sohTimeline.push({ year: t, soh: roundedSOH });
+      rangeTimeline.push({ year: t, range: Math.round(baseOperationalRangeAtStart * (roundedSOH / 100)) });
     }
 
-    let yearInfraOverhead = 0;
+    let yearStationManpower = 0;
+    let yearLandLease = 0;
     if (v.type === "electric") {
-      yearInfraOverhead = ((uniqueStationsCount * v.stationMaintenance) + (totalChargersNeeded * v.chargerMaintenance) + ((v.depotDemandChargesMonthly + v.depotLandLeaseMonthly) * 12)) * multI;
+      yearStationManpower = totalMonthlyStationManpower * 12 * multW;
+      yearLandLease = (v.depotLandLeaseMonthly || 0) * 12 * multLand;
     }
 
-    const totalYearlyExpenses = yearEMI + yearFuelOrEnergy + yearMaint + yearIns + yearWages + yearTolls + yearTyres + yearBatteryCost + yearInfraOverhead + yearMisc;
+    const totalYearlyExpenses = yearEMI + yearFuelOrEnergy + yearMaint + yearIns + yearWages + yearTolls + yearTyres + yearBatteryCost + yearStationManpower + yearLandLease + yearMisc;
     npvTCOSum += totalYearlyExpenses * df;
     cumCostTimeline.push(cumCostTimeline[cumCostTimeline.length - 1] + totalYearlyExpenses);
 
@@ -517,14 +555,15 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     breakdown.tolls += yearTolls * df;
     breakdown.tyres += yearTyres * df;
     breakdown.batteryReplacements += yearBatteryCost * df;
-    breakdown.infraMaintenance += yearInfraOverhead * df;
+    breakdown.stationManpower += yearStationManpower * df;
+    breakdown.infraLandLease += yearLandLease * df;
     breakdown.misc += yearMisc * df;
     breakdown.operatorMargin += yearOperatorMargin * df;
 
     npvMarginTarget += yearOperatorMargin * df;
   }
 
-  const npvResidualValue = v.purchasePrice * (v.residualPct / 100) * fleetSizeRequired * (1 / Math.pow(1 + dfRate, years));
+  const npvResidualValue = v.purchasePrice * (v.residualPct / 100) * fleetSizeRequired * (dfRate > 0 ? (1 / Math.pow(1 + dfRate, years)) : 1);
   npvTCOSum -= npvResidualValue;
   cumCostTimeline[years] -= v.purchasePrice * (v.residualPct / 100) * fleetSizeRequired;
   breakdown.residuals = -npvResidualValue;
@@ -533,34 +572,11 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   const costPerTonneKm = totalCargoTonneKmFleet > 0 ? npvTCOSum / totalCargoTonneKmFleet : 0;
   const requiredRevenueNPV = npvTCOSum + npvMarginTarget;
   const requiredFreightRatePerTonneKm = totalCargoTonneKmFleet > 0 ? requiredRevenueNPV / totalCargoTonneKmFleet : 0;
-  const marginMultiplier = npvTCOSum > 0 ? requiredRevenueNPV / npvTCOSum : 1;
 
-  const maxTheoreticalRange = v.type === "electric" ? v.batteryCapacity * avgRouteEconomy : (v.type === "diesel" ? v.fuelCapacityLitres * avgRouteEconomy : 0);
-  const operationalRangeAtStart = v.type === "electric" ? v.batteryCapacity * ((100 - v.safeSoCThreshold) / 100) * avgRouteEconomy : 0;
-  const operationalRangeAtSOHLimit = v.type === "electric" ? operationalRangeAtStart * (resolvedSOHReplacementLimit / 100) : 0;
+  const operationalRangeAtSOHLimit = v.type === "electric" ? baseOperationalRangeAtStart * (resolvedSOHReplacementLimit / 100) : 0;
 
-  const tyreCostPerKmFlat = (v.tyresFront * v.tyreCostFront / Math.max(1, v.tyreLifeFront)) +
-    (v.tyresRear * v.tyreCostRear / Math.max(1, v.tyreLifeRear)) +
-    (v.tyresTrailer * v.tyreCostTrailer / Math.max(1, v.tyreLifeTrailer));
-
-  const fixedCostBucketNPV = breakdown.upfront + breakdown.emi + breakdown.insurance + breakdown.wages +
-    breakdown.tolls + breakdown.infraMaintenance + breakdown.misc + breakdown.batteryReplacements + breakdown.residuals;
-  const totalTripsOverLife = Math.max(1, totalTripsAcrossFleetYear * years);
-  const fixedCostPerTrip = fixedCostBucketNPV / totalTripsOverLife;
-  
-  let totalOperatingCostTrip = 0;
-  routeSegments.forEach((seg, idx) => {
-      const segEconomy = Math.max(0.01, segmentEconomies[idx]);
-      const fuelPricePerUnit = v.type === "diesel" ? v.fuelOrElectricPrice : v.electricityRate;
-      const fuelCostPerKm = fuelPricePerUnit / segEconomy;
-      const operatingCostPerKm = fuelCostPerKm + v.maintCostPerKm + tyreCostPerKmFlat;
-      totalOperatingCostTrip += operatingCostPerKm * seg.distance;
-  });
-  
-  const totalTripCost = totalOperatingCostTrip + fixedCostPerTrip;
-  const totalTripRequiredRevenue = totalTripCost * marginMultiplier;
-  const loopCostPerTonneKm = tonneKmPerTrip > 0 ? totalTripCost / tonneKmPerTrip : 0;
-  const loopFreightRatePerTonneKm = tonneKmPerTrip > 0 ? totalTripRequiredRevenue / tonneKmPerTrip : 0;
+  const loopCostPerTonneKm = costPerTonneKm;
+  const loopFreightRatePerTonneKm = requiredFreightRatePerTonneKm;
 
   let totalFreightRatePerTonneTrip = 0;
 
@@ -569,6 +585,9 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     const segEconomy = Math.max(0.01, segmentEconomies[idx]);
     const fuelPricePerUnit = v.type === "diesel" ? v.fuelOrElectricPrice : v.electricityRate;
     const fuelCostPerKm = fuelPricePerUnit / segEconomy;
+    const tyreCostPerKmFlat = (v.tyresFront * v.tyreCostFront / Math.max(1, v.tyreLifeFront)) +
+      (v.tyresRear * v.tyreCostRear / Math.max(1, v.tyreLifeRear)) +
+      (v.tyresTrailer * v.tyreCostTrailer / Math.max(1, v.tyreLifeTrailer));
     const operatingCostPerKm = fuelCostPerKm + v.maintCostPerKm + tyreCostPerKmFlat;
     
     const costPerTonneKmSeg = cappedPayload > 0 ? loopCostPerTonneKm : null;
@@ -577,7 +596,7 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     const freightRatePerTonneSeg = cappedPayload > 0 ? loopFreightRatePerTonneKm * seg.distance : null;
     
     if (freightRatePerTonneSeg) {
-        totalFreightRatePerTonneTrip += freightRatePerTonneSeg;
+      totalFreightRatePerTonneTrip += freightRatePerTonneSeg;
     }
 
     return {
@@ -593,10 +612,11 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     fleetSizeRequired, usesSegmentDemand, tripsPerYearPerVehicle, totalTripsAcrossFleetYear, totalDistanceAcrossFleetYear,
     tonneKmPerTrip, annualTonneKmFleet, totalChargersNeeded, uniqueStationsCount, npvTCOSum, cumCostTimeline, breakdown,
     costPerTonneKm, requiredFreightRatePerTonneKm, segmentCostPerTonneKm, totalFreightRatePerTonneTrip, currentSOH,
-    criticalSOHLimit, resolvedSOHReplacementLimit, batterySetsReplacedCount, batteryReplacementLog, sohTimeline,
-    segmentOverloads, maxTheoreticalRange, operationalRangeAtStart, operationalRangeAtSOHLimit, replacementsPerVehicle: batteryReplacementLog.length,
+    criticalSOHLimit, resolvedSOHReplacementLimit, batterySetsReplacedCount, batteryReplacementLog, sohTimeline, rangeTimeline,
+    segmentOverloads, maxTheoreticalRange: baseTheoreticalRange, operationalRangeAtStart: baseOperationalRangeAtStart, operationalRangeAtSOHLimit, replacementsPerVehicle: batteryReplacementLog.length,
     totalUpfrontGSTPrice, loanUpfrontDownpayment, loanPrincipalDebt, loanAnnualEMI, loanMonthlyEMI: loanAnnualEMI / 12,
-    capitalSetupInfra, infraCapexPerTruck, loadedCapexPerTruckOnRoad, loadedCapexPerTruckEquity, totalFleetUpfrontCapex, totalFleetOnRoadCapex
+    capitalSetupInfra, infraCapexPerTruck, loadedCapexPerTruckOnRoad, loadedCapexPerTruckEquity, totalFleetUpfrontCapex, totalFleetOnRoadCapex,
+    autoStationManpower, totalMonthlyStationManpower
   };
 }
 
@@ -648,13 +668,21 @@ export default function ComprehensiveTCOCalculator() {
   const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(25);
   const [loadingUnloadingTimePerTrip, setLoadingUnloadingTimePerTrip] = useState(10);
   const [analysisPeriod, setAnalysisPeriod] = useState(10);
-  const [discountRate, setDiscountRate] = useState(0);
+  
+  // Discounting configuration
+  const [enableDiscounting, setEnableDiscounting] = useState(false);
+  const [discountRate, setDiscountRate] = useState(10);
 
-  const [escGeneral, setEscGeneral] = useState(5.0);
-  const [escFuel, setEscFuel] = useState(5.0);
-  const [escElectricity, setEscElectricity] = useState(5.0);
-  const [escWages, setEscWages] = useState(7.0);
-  const [escInfrastructure, setEscInfrastructure] = useState(7.0);
+  // Active Cost Escalations (% p.a.)
+  const [escFuel, setEscFuel] = useState(1.0);              // Tariff (Diesel)
+  const [escElectricity, setEscElectricity] = useState(2.0); // Energy Cost
+  const [escAMC, setEscAMC] = useState(0.0);                 // AMC (Maintenance)
+  const [escToll, setEscToll] = useState(0.0);               // Toll
+  const [escTyre, setEscTyre] = useState(2.0);               // Tyre
+  const [escMisc, setEscMisc] = useState(2.0);                // Misc. & Corporate Overheads
+  const [escInsurance, setEscInsurance] = useState(1.0);      // Insurance
+  const [escWages, setEscWages] = useState(5.0);              // Driver & Infra Manpower Salary
+  const [escLandLease, setEscLandLease] = useState(7.0);      // Land Lease rental
 
   const [routeSegments, setRouteSegments] = useState(DEFAULT_ROUTE.map((s, i) => ({
     ...s, monthlyTonnage: i === 1 ? 0 : 85000
@@ -708,10 +736,13 @@ export default function ComprehensiveTCOCalculator() {
     } else {
       baseDefault.batteryCapacity = 500; baseDefault.batteryReplacementCost = 3800000;
       baseDefault.batteryDegradationPerCycle = 0.006; baseDefault.batterySOHThreshold = 75;
-      baseDefault.safeSoCThreshold = 20; baseDefault.stationCost = 3500000; baseDefault.stationMaintenance = 120000;
-      baseDefault.chargerCost = 1500000; baseDefault.chargerMaintenance = 50000; baseDefault.infrastructureTaxCredit = 5;
-      baseDefault.chargeSpeedKW = 150; baseDefault.chargingTimeMarginPct = 200; baseDefault.electricityRate = 8.5;
-      baseDefault.depotLandLeaseMonthly = 120000; baseDefault.depotDemandChargesMonthly = 80000; baseDefault.useDynamicSOHLimit = true;
+      baseDefault.safeSoCThreshold = 10; baseDefault.stationCost = 2500000;
+      baseDefault.chargerCost = 1500000; baseDefault.defaultChargersPerStation = 5; baseDefault.infrastructureTaxCredit = 0;
+      baseDefault.chargeSpeedKW = 150; baseDefault.chargingTimeMarginPct = 10; baseDefault.electricityRate = 8.5;
+      baseDefault.depotLandLeaseMonthly = 0;
+      baseDefault.costPerManpower = 25000; baseDefault.opsInchargeCount = 2; baseDefault.opsInchargeCost = 70000;
+      baseDefault.supportingManpowerCount = 6; baseDefault.supportingManpowerCost = 40000;
+      baseDefault.useDynamicSOHLimit = true;
     }
 
     setVehicles([...vehicles, baseDefault]);
@@ -810,10 +841,12 @@ export default function ComprehensiveTCOCalculator() {
 
   const results = useMemo(() => {
     const years = Math.max(1, Math.round(analysisPeriod));
+    const effectiveDiscountRate = enableDiscounting ? (discountRate / 100) : 0;
     const cfg = {
-      years, dfRate: discountRate / 100, escGen: escGeneral / 100, escF: escFuel / 100,
-      escE: escElectricity / 100, escW: escWages / 100, escI: escInfrastructure / 100,
-      workingDaysPerMonth, loadingUnloadingTimePerTrip
+      years, dfRate: effectiveDiscountRate,
+      escF: escFuel / 100, escE: escElectricity / 100, escAMC: escAMC / 100, escToll: escToll / 100,
+      escTyre: escTyre / 100, escMisc: escMisc / 100, escIns: escInsurance / 100, escW: escWages / 100,
+      escLand: escLandLease / 100, workingDaysPerMonth, loadingUnloadingTimePerTrip
     };
 
     const computedVehicles = vehicles.map((v) => computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, dieselMatrix, evMatrix));
@@ -852,7 +885,7 @@ export default function ComprehensiveTCOCalculator() {
     const segmentFreightData = routeSegments.map((seg, idx) => {
       const row = { name: `${seg.from} → ${seg.to}` };
       computedVehicles.forEach(v => {
-        row[v.name] = v.segmentCostPerTonneKm[idx].freightRatePerTonneSeg || 0;
+        row[v.name] = Math.round(v.segmentCostPerTonneKm[idx]?.freightRatePerTonneSeg || 0);
       });
       return row;
     });
@@ -865,8 +898,29 @@ export default function ComprehensiveTCOCalculator() {
       };
     });
 
-    return { years, computedVehicles, chartData, cfg, firstDiesel, firstElectric, breakevenYear, radarData, segmentFreightData, timeUtilizationData };
-  }, [ vehicles, routeSegments, chargingStationOverrides, workingDaysPerMonth, loadingUnloadingTimePerTrip, analysisPeriod, discountRate, escGeneral, escFuel, escElectricity, escWages, escInfrastructure, dieselMatrix, evMatrix ]);
+    const rangeLifecycleData = computedVehicles.filter(v => v.type === "electric").map(v => ({
+      name: v.name, "Start of Life (100% SOH)": Math.round(v.operationalRangeAtStart), "End of Life (SOH Limit)": Math.round(v.operationalRangeAtSOHLimit)
+    }));
+
+    const evVehicles = computedVehicles.filter(v => v.type === "electric");
+    const multiEvSohData = [];
+    const multiEvRangeData = [];
+
+    for (let t = 1; t <= years; t++) {
+      const sohRow = { year: t };
+      const rangeRow = { year: t };
+      evVehicles.forEach(v => {
+        const sohItem = v.sohTimeline.find(item => item.year === t);
+        const rangeItem = v.rangeTimeline.find(item => item.year === t);
+        sohRow[v.name] = sohItem ? sohItem.soh : 100;
+        rangeRow[v.name] = rangeItem ? rangeItem.range : Math.round(v.operationalRangeAtStart);
+      });
+      multiEvSohData.push(sohRow);
+      multiEvRangeData.push(rangeRow);
+    }
+
+    return { years, computedVehicles, chartData, cfg, firstDiesel, firstElectric, breakevenYear, radarData, segmentFreightData, timeUtilizationData, rangeLifecycleData, multiEvSohData, multiEvRangeData, evVehicles };
+  }, [ vehicles, routeSegments, chargingStationOverrides, workingDaysPerMonth, loadingUnloadingTimePerTrip, analysisPeriod, enableDiscounting, discountRate, escFuel, escElectricity, escAMC, escToll, escTyre, escMisc, escInsurance, escWages, escLandLease, dieselMatrix, evMatrix ]);
 
   const handleRunOptimizer = (vehicleId) => {
     const v = vehicles.find((vv) => vv.id === vehicleId);
@@ -913,7 +967,7 @@ export default function ComprehensiveTCOCalculator() {
     { id: 'kpi', label: 'Summary & KPIs', icon: <Target size={14} /> },
     { id: 'segment', label: 'Unit Economics', icon: <Route size={14} /> },
     { id: 'timeline', label: 'Timeline & Breakdown', icon: <BarChart3 size={14} /> },
-    { id: 'battery', label: 'EV Infrastructure', icon: <Zap size={14} /> }
+    { id: 'battery', label: 'EV Infrastructure & Sizing', icon: <Zap size={14} /> }
   ];
 
   return (
@@ -1004,32 +1058,39 @@ export default function ComprehensiveTCOCalculator() {
         .alert-strip { background: rgba(239, 68, 68, 0.08); border: 1px solid var(--bad); color: var(--text); border-radius: 8px; padding: 14px; font-size: 13px; margin-bottom: 24px; display: flex; align-items: flex-start; gap: 10px; line-height: 1.4; }
         .breakeven-strip { background: rgba(33, 196, 175, 0.08); border: 1px solid var(--bev); color: var(--text); border-radius: 8px; padding: 16px 18px; font-size: 13px; margin-bottom: 24px; display: flex; align-items: center; gap: 14px; line-height: 1.4; }
         .section-tag { font-size: 11px; font-weight: 700; color: var(--bev); text-transform: uppercase; letter-spacing: 0.08em; margin: 20px 0 10px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
-        .legend-row { display: flex; flex-wrap: wrap; gap: 16px; font-size: 12px; color: var(--text-dim); margin-bottom: 12px; }
-        .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
         .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
         .badge-good { background: rgba(16, 185, 129, 0.1); color: var(--good); border: 1px solid rgba(16, 185, 129, 0.2); }
         .badge-warn { background: rgba(226, 149, 50, 0.1); color: var(--diesel); border: 1px solid rgba(226, 149, 50, 0.2); }
         .badge-info { background: rgba(33, 196, 175, 0.1); color: var(--bev); border: 1px solid rgba(33, 196, 175, 0.2); }
         .optimizer-box { background: var(--panel-alt); border: 1px dashed var(--bev); border-radius: 10px; padding: 14px; margin-top: 12px; }
-        .emi-widget { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-top: 12px; }
         .optimizer-result { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px; font-size: 12px; }
         .mini-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--bev); color: #0c0e0f; border: none; padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
-        .mini-btn:hover { opacity: 0.9; }
         .mini-btn-outline { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: var(--bev); border: 1px solid var(--bev); padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
         .seg-cost-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
         .seg-cost-table th { text-align: right; padding: 8px 10px; color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; border-bottom: 2px solid var(--border); }
         .seg-cost-table th:first-child { text-align: left; }
         .seg-cost-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
         .seg-cost-table td:first-child { text-align: left; color: var(--text-dim); }
-        .pie-chart-container { display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        .pie-legend { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; font-size: 11px; }
-        .pie-legend-item { display: flex; align-items: center; gap: 4px; color: var(--text-dim); }
         .time-split-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 14px; }
         .time-split-table th { text-align: right; padding: 8px 10px; color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; border-bottom: 2px solid var(--border); }
         .time-split-table th:first-child { text-align: left; }
         .time-split-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
         .time-split-table td:first-child { text-align: left; }
-        .time-split-table tr.total-row td { border-top: 2px solid var(--border); border-bottom: none; font-weight: 700; }
+
+        .flow-track { display: flex; align-items: stretch; overflow-x: auto; gap: 12px; padding: 16px 6px 24px; scrollbar-width: thin; }
+        .flow-node-card-interactive { min-width: 250px; background: var(--panel); border: 1.5px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow-sm); position: relative; transition: all 0.2s ease; }
+        .flow-node-card-interactive:hover { border-color: var(--bev); box-shadow: var(--shadow-md); }
+        .flow-dial { width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; border: 3px solid var(--bev); background: var(--panel-alt); box-shadow: 0 0 0 3px rgba(33,196,175,0.08); flex-shrink: 0; }
+        .flow-dial.start-dial { border-color: var(--good); box-shadow: 0 0 0 3px rgba(16,185,129,0.08); }
+        .flow-connector-interactive { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 70px; position: relative; padding: 0 4px; }
+        .flow-connector-line { width: 100%; height: 2px; background: repeating-linear-gradient(90deg, var(--border) 0, var(--border) 6px, transparent 6px, transparent 11px); position: relative; }
+        .flow-connector-line::after { content: ''; position: absolute; right: 0; top: -4px; border-style: solid; border-width: 5px 0 5px 8px; border-color: transparent transparent transparent var(--text-dim); }
+        .flow-connector-label { font-size: 10px; color: var(--text-dim); margin-top: 6px; text-align: center; white-space: nowrap; font-family: 'JetBrains Mono', monospace; }
+
+        .donut-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; align-items: center; }
+        .donut-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; justify-content: center; margin-top: 14px; }
+        .donut-legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); }
+        .donut-legend-color { width: 8px; height: 8px; border-radius: 50%; }
       `}</style>
 
       {/* Header controls */}
@@ -1069,7 +1130,7 @@ export default function ComprehensiveTCOCalculator() {
         ))}
       </div>
 
-      {/* Global Safety Warnings (always visible below tabs if present) */}
+      {/* Payload Violation Warning Strip */}
       {results.computedVehicles.some(v => v.segmentOverloads.length > 0) && (
         <div className="alert-strip">
           <AlertTriangle size={20} style={{ flexShrink: 0, color: "var(--bad)" }} />
@@ -1081,8 +1142,7 @@ export default function ComprehensiveTCOCalculator() {
                 if (v.segmentOverloads.length === 0) return null;
                 return (
                   <div key={v.id} style={{ fontSize: "12px", color: "var(--text-dim)" }}>
-                    · <strong>{v.name}</strong> payload capacity is capped at <strong>{v.payloadCap.toFixed(1)}T</strong> (Segment cargo limits scaled down internally). 
-                    <em style={{display: 'block', marginTop: 2, color: 'var(--text-dim)'}}>Enable "Allow Overloading" in the vehicle profile to override this constraint.</em>
+                    · <strong>{v.name}</strong> payload capacity is capped at <strong>{v.payloadCap.toFixed(1)}T</strong>. 
                   </div>
                 );
               })}
@@ -1099,17 +1159,41 @@ export default function ComprehensiveTCOCalculator() {
             <div>
               <div className="section-tag" style={{ marginTop: 0 }}>Logistics & Timeline</div>
               <Field label="Operational Working Days" value={workingDaysPerMonth} onChange={setWorkingDaysPerMonth} suffix="Days/Month" step={1} />
-              <Field label="Turnaround Load/Unload Cost" value={loadingUnloadingTimePerTrip} onChange={setLoadingUnloadingTimePerTrip} suffix="Hours" step={0.5} />
+              <Field label="Turnaround Load/Unload Time" value={loadingUnloadingTimePerTrip} onChange={setLoadingUnloadingTimePerTrip} suffix="Hours/Trip" step={0.5} />
               <Field label="Analysis Window" value={analysisPeriod} onChange={setAnalysisPeriod} suffix="Years" step={1} />
-              <Field label="Discount Rate (WACC)" value={discountRate} onChange={setDiscountRate} suffix="%" step={0.5} />
+              
+              <div className="field" style={{ marginTop: 14 }}>
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  <span className="field-label" style={{ fontWeight: 600 }}>Discount Rate / DCF Analysis</span>
+                  <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>
+                    {enableDiscounting ? "Active: Cash flows discounted to present value" : "Disabled: Nominal / undiscounted cash flows"}
+                  </span>
+                </div>
+                <button
+                  onClick={() => setEnableDiscounting(!enableDiscounting)}
+                  className="mini-btn-outline"
+                  style={{ borderColor: enableDiscounting ? "var(--bev)" : "var(--border)", color: enableDiscounting ? "var(--bev)" : "var(--text-dim)" }}
+                >
+                  {enableDiscounting ? <ToggleRight size={18} color="var(--bev)" /> : <ToggleLeft size={18} />}
+                  {enableDiscounting ? "Enabled" : "Off"}
+                </button>
+              </div>
+
+              {enableDiscounting && (
+                <Field label="Discount Rate (WACC)" value={discountRate} onChange={setDiscountRate} suffix="%" step={0.5} />
+              )}
             </div>
             <div>
-              <div className="section-tag" style={{ marginTop: 0 }}>Inflation Parameters</div>
-              <Field label="General Inflation Rate" value={escGeneral} onChange={setEscGeneral} suffix="%" step={0.5} />
-              <Field label="Diesel Price Inflation" value={escFuel} onChange={setEscFuel} suffix="%" step={0.5} />
-              <Field label="Electricity Tariff Inflation" value={escElectricity} onChange={setEscElectricity} suffix="%" step={0.5} />
-              <Field label="Wages Inflation" value={escWages} onChange={setEscWages} suffix="%" step={0.5} />
-              <Field label="Depot Leases Inflation" value={escInfrastructure} onChange={setEscInfrastructure} suffix="%" step={0.5} />
+              <div className="section-tag" style={{ marginTop: 0 }}>Cost Escalations (% per annum)</div>
+              <Field label="Tariff (Diesel Fuel Price)" value={escFuel} onChange={setEscFuel} suffix="%" step={0.5} />
+              <Field label="Energy Cost (Electricity Tariff)" value={escElectricity} onChange={setEscElectricity} suffix="%" step={0.5} />
+              <Field label="AMC Escalation (Maintenance)" value={escAMC} onChange={setEscAMC} suffix="%" step={0.5} />
+              <Field label="Toll" value={escToll} onChange={setEscToll} suffix="%" step={0.5} />
+              <Field label="Tyre" value={escTyre} onChange={setEscTyre} suffix="%" step={0.5} />
+              <Field label="Misc. & Overheads" value={escMisc} onChange={setEscMisc} suffix="%" step={0.5} />
+              <Field label="Insurance" value={escInsurance} onChange={setEscInsurance} suffix="%" step={0.5} />
+              <Field label="Driver & Manpower Salary" value={escWages} onChange={setEscWages} suffix="%" step={0.5} />
+              <Field label="Land Lease Rental" value={escLandLease} onChange={setEscLandLease} suffix="%" step={0.5} />
             </div>
           </div>
         </div>
@@ -1203,11 +1287,11 @@ export default function ComprehensiveTCOCalculator() {
                     {!v.useDynamicSOHLimit && (
                       <Field label="Manual Target SOH Trigger" value={v.batterySOHThreshold} onChange={(val) => updateVehicleProp(v.id, "batterySOHThreshold", val)} suffix="%" step={1} />
                     )}
-                    <Field label="Reserve Safe Limit Margin" value={v.safeSoCThreshold} onChange={(val) => updateVehicleProp(v.id, "safeSoCThreshold", val)} suffix="%" step={1} />
+                    <Field label="Reserve Safe Limit Margin (Reserve SoC)" value={v.safeSoCThreshold} onChange={(val) => updateVehicleProp(v.id, "safeSoCThreshold", val)} suffix="%" step={1} />
                   </>
                 )}
 
-                <div className="section-tag">Tyre Layout & Costing (Independent Axles)</div>
+                <div className="section-tag">Tyre Layout & Costing</div>
                 <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "8px", padding: "10px", display: "flex", gap: "12px", flexDirection: "column" }}>
                   <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1.5fr 1.5fr", gap: "8px", fontSize: "11px", fontWeight: 600, color: "var(--text-dim)", textAlign: "center" }}>
                     <div style={{ textAlign: "left" }}>Axle</div>
@@ -1225,57 +1309,67 @@ export default function ComprehensiveTCOCalculator() {
                   ))}
                 </div>
 
-                <div className="section-tag">Overhead & Operating Parameters</div>
-                <Field label="Periodic Maintenance (per vehicle)" value={v.maintCostPerKm} onChange={(val) => updateVehicleProp(v.id, "maintCostPerKm", val)} suffix="₹/km" step={0.1} />
+                <div className="section-tag">Maintenance (AMC) & Residuals</div>
+                <Field label="Periodic Maintenance / AMC Rate" value={v.maintCostPerKm} onChange={(val) => updateVehicleProp(v.id, "maintCostPerKm", val)} suffix="₹/km" step={0.1} />
                 <Field label="Annual Insurance Rate (on declining IDV)" value={v.insuranceRatePct} onChange={(val) => updateVehicleProp(v.id, "insuranceRatePct", val)} suffix="%" step={0.25} />
                 <Field label="Terminal Salvage Value (per vehicle)" value={v.residualPct} onChange={(val) => updateVehicleProp(v.id, "residualPct", val)} suffix="%" step={1} />
 
                 <div className="section-tag">Drivers & Operator Margin</div>
                 <Field label="Drivers per Vehicle" value={v.driversPerVehicle} onChange={(val) => updateVehicleProp(v.id, "driversPerVehicle", Math.max(1, Math.round(val)))} suffix="Drivers" step={1} min={1} />
                 <Field label="Driver Salary (per driver)" value={v.driverSalaryMonthly} onChange={(val) => updateVehicleProp(v.id, "driverSalaryMonthly", val)} suffix="₹/mo" step={1000} />
-                <Field label="Operator Margin (fleet operator's profit target)" value={v.operatorMarginPerTruckMonthly} onChange={(val) => updateVehicleProp(v.id, "operatorMarginPerTruckMonthly", val)} suffix="₹/truck/mo" step={1000} />
+                <Field label="Operator Margin (target profit)" value={v.operatorMarginPerTruckMonthly} onChange={(val) => updateVehicleProp(v.id, "operatorMarginPerTruckMonthly", val)} suffix="₹/truck/mo" step={1000} />
                 <Field label="Toll Overhead Per Trip (per vehicle)" value={v.tollCostPerTrip} onChange={(val) => updateVehicleProp(v.id, "tollCostPerTrip", val)} suffix="₹" step={250} />
 
                 <div className="section-tag">Miscellaneous Expenses</div>
                 <Field label="Misc Cost Per Month (per vehicle)" value={v.miscCostPerMonth} onChange={(val) => updateVehicleProp(v.id, "miscCostPerMonth", val)} suffix="₹/mo" step={500} />
                 <TextField label="Expense Notes" value={v.miscCostNotes} onChange={(val) => updateVehicleProp(v.id, "miscCostNotes", val)} placeholder="e.g. permits, parking..." />
 
-                <div className="section-tag">Downtime & Utilization</div>
+                <div className="section-tag">Downtime & Delays</div>
                 <Field label="Driver Rest/Delay Factor" value={v.driverRestDelayFactorKm} onChange={(val) => updateVehicleProp(v.id, "driverRestDelayFactorKm", val)} suffix="km / 1 hr delay" step={10} min={10} />
-                <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginTop: "-8px", marginBottom: "10px" }}>
-                  Calculates driver rest and miscellaneous en-route delays.
-                </div>
                 <Field label="Scheduled Service (per vehicle)" value={v.scheduledDowntimeDays} onChange={(val) => updateVehicleProp(v.id, "scheduledDowntimeDays", val)} suffix="Days/Year" step={1} />
                 <Field label="Unscheduled Outages (per vehicle)" value={v.unscheduledDowntimeHrs} onChange={(val) => updateVehicleProp(v.id, "unscheduledDowntimeHrs", val)} suffix="Hours/Year" step={1} />
-                
-                {currentComputed && (
-                  <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "-4px", lineHeight: 1.6 }}>
-                    Driver Rest / En-route Delay (per loop): <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.generalRestDowntimeHrs.toFixed(2)} hrs</strong><br />
-                    {v.type === "electric" && <>Charging downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.chargingDowntimeHrs.toFixed(2)} hrs</strong><br /></>}
-                    {v.type === "diesel" && <>Refueling downtime per loop: <strong className="num" style={{ color: "var(--text)" }}>{currentComputed.refuelingDowntimeHrs.toFixed(2)} hrs</strong><br /></>}
-                    Final utilization (driving ÷ turnaround): <strong className="num" style={{ color: "var(--bev)" }}>{currentComputed.utilizationPctComputed.toFixed(1)}%</strong>
-                  </div>
-                )}
 
                 {v.type === "electric" && (
                   <>
-                    <div className="section-tag">Charger Infrastructure Sizing</div>
-                    <Field label="Station Setup Cost" value={v.stationCost} onChange={(val) => updateVehicleProp(v.id, "stationCost", val)} suffix="₹/station" step={100000} />
-                    <Field label="Station Annual Upkeep" value={v.stationMaintenance} onChange={(val) => updateVehicleProp(v.id, "stationMaintenance", val)} suffix="₹/yr" step={10000} />
+                    <div className="section-tag">Charger & Depot Capital Cost (Capex)</div>
+                    <Field label="Station Setup & Civil Cost" value={v.stationCost} onChange={(val) => updateVehicleProp(v.id, "stationCost", val)} suffix="₹/station" step={100000} />
                     <Field label="Charger Dispenser Unit Cost" value={v.chargerCost} onChange={(val) => updateVehicleProp(v.id, "chargerCost", val)} suffix="₹/unit" step={50000} />
-                    <Field label="Charger Annual Upkeep" value={v.chargerMaintenance} onChange={(val) => updateVehicleProp(v.id, "chargerMaintenance", val)} suffix="₹/yr" step={5000} />
+                    <Field label="Default Plugs Per Station" value={v.defaultChargersPerStation || 5} onChange={(val) => updateVehicleProp(v.id, "defaultChargersPerStation", Math.max(1, Math.round(val)))} suffix="plugs/station" step={1} />
                     <Field label="Infra Subsidies / Incentives" value={v.infrastructureTaxCredit} onChange={(val) => updateVehicleProp(v.id, "infrastructureTaxCredit", val)} suffix="%" step={1} />
                     <Field label="Charger Output Speed" value={v.chargeSpeedKW} onChange={(val) => updateVehicleProp(v.id, "chargeSpeedKW", val)} suffix="kW" step={10} />
                     <Field label="Charging Time Margin" value={v.chargingTimeMarginPct} onChange={(val) => updateVehicleProp(v.id, "chargingTimeMarginPct", val)} suffix="%" step={1} />
-                    <Field label="Depot Electricity Rate" value={v.electricityRate} onChange={(val) => updateVehicleProp(v.id, "electricityRate", val)} suffix="₹/kWh" step={0.5} />
-                    <Field label="Monthly Depot Land Lease" value={v.depotLandLeaseMonthly} onChange={(val) => updateVehicleProp(v.id, "depotLandLeaseMonthly", val)} suffix="₹" step={5000} />
-                    <Field label="Monthly Peak Demand Fee" value={v.depotDemandChargesMonthly} onChange={(val) => updateVehicleProp(v.id, "depotDemandChargesMonthly", val)} suffix="₹" step={5000} />
+                    <Field label="Electricity Tariff Rate" value={v.electricityRate} onChange={(val) => updateVehicleProp(v.id, "electricityRate", val)} suffix="₹/kWh" step={0.5} />
+
+                    <div className="section-tag"><Users size={13} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} /> EV Infrastructure Manpower (Opex)</div>
+                    <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "8px", padding: "12px", marginBottom: "12px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "6px" }}>
+                        <span style={{ fontSize: "12px", fontWeight: 600 }}>Station Manpower</span>
+                        <span className="num" style={{ fontSize: "11.5px", color: "var(--bev)" }}>
+                          {currentComputed ? currentComputed.autoStationManpower : 0} staff <small style={{ color: "var(--text-dim)" }}>(Auto-calculated: 3 shifts/station)</small>
+                        </span>
+                      </div>
+                      <Field label="Cost per Manpower" value={v.costPerManpower || 25000} onChange={(val) => updateVehicleProp(v.id, "costPerManpower", val)} suffix="₹/mo" step={1000} />
+                      
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: "10px", marginTop: "10px", borderTop: "1px dashed var(--border)", paddingTop: "10px" }}>
+                        <Field label="Ops Incharge (#)" value={v.opsInchargeCount !== undefined ? v.opsInchargeCount : 2} onChange={(val) => updateVehicleProp(v.id, "opsInchargeCount", Math.round(val))} step={1} />
+                        <Field label="Operations Cost" value={v.opsInchargeCost || 70000} onChange={(val) => updateVehicleProp(v.id, "opsInchargeCost", val)} suffix="₹/mo" step={2500} />
+                      </div>
+
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.5fr", gap: "10px", marginTop: "6px" }}>
+                        <Field label="Supporting (#)" value={v.supportingManpowerCount !== undefined ? v.supportingManpowerCount : 6} onChange={(val) => updateVehicleProp(v.id, "supportingManpowerCount", Math.round(val))} step={1} />
+                        <Field label="Supporting Cost" value={v.supportingManpowerCost || 40000} onChange={(val) => updateVehicleProp(v.id, "supportingManpowerCost", val)} suffix="₹/mo" step={2500} />
+                      </div>
+
+                      <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10px", paddingTop: "8px", borderTop: "1px solid var(--border)", fontSize: "12px" }}>
+                        <span>Total Monthly Infra Manpower:</span>
+                        <strong className="num" style={{ color: "var(--bev)" }}>{inr(currentComputed ? currentComputed.totalMonthlyStationManpower : 0)}/mo</strong>
+                      </div>
+                    </div>
 
                     <div className="section-tag"><Sparkles size={12} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} /> TCO-Optimal Charging Network</div>
                     <div className="optimizer-box">
                       <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "10px", lineHeight: 1.5 }}>
-                        Tries every combination of terminal depot-charger placement across your {routeSegments.length} route segments to find the lowest lifecycle NPV TCO.
-                        {routeSegments.length > 12 && " (Disabled for >12 segments)"}
+                        Tries every combination of terminal depot-charger placement across your route segments to find the lowest lifecycle NPV TCO.
                       </div>
                       {routeSegments.length <= 12 && (
                         <button className="mini-btn-outline" onClick={() => handleRunOptimizer(v.id)} disabled={optimizerRunning === v.id}>
@@ -1323,24 +1417,6 @@ export default function ComprehensiveTCOCalculator() {
                     <Field label="Equity Contribution" value={v.downPaymentPct} onChange={(val) => updateVehicleProp(v.id, "downPaymentPct", val)} suffix="%" step={5} />
                     <Field label="Annual Interest Rate" value={v.interestRate} onChange={(val) => updateVehicleProp(v.id, "interestRate", val)} suffix="%" step={0.25} />
                     <Field label="Loan Duration Window" value={v.loanTenure} onChange={(val) => updateVehicleProp(v.id, "loanTenure", val)} suffix="Years" step={1} />
-
-                    {currentComputed && (
-                      <div className="emi-widget">
-                        <div className="kpi-label" style={{ color: v.type === "electric" ? "var(--bev)" : "var(--diesel)" }}>
-                          <DollarSign size={13} style={{ marginRight: 4 }} /> EMI Snapshot (per vehicle)
-                        </div>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: "6px" }}>
-                          <span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Monthly EMI</span><strong className="num" style={{ fontSize: "17px" }}>{inr(currentComputed.loanMonthlyEMI)}</strong>
-                        </div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "10px", paddingTop: "8px", borderTop: "1px dashed var(--border)" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total vehicle cost (on-road)</span><span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.totalUpfrontGSTPrice)}</span></div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Down payment</span><span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanUpfrontDownpayment)}</span></div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Loan principal</span><span className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanPrincipalDebt)}</span></div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total interest over {v.loanTenure}y</span><span className="num" style={{ fontSize: "11.5px", color: "var(--bad)" }}>{inr(Math.max(0, currentComputed.loanAnnualEMI * v.loanTenure - currentComputed.loanPrincipalDebt))}</span></div>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>Total repayment</span><strong className="num" style={{ fontSize: "11.5px" }}>{inr(currentComputed.loanAnnualEMI * v.loanTenure)}</strong></div>
-                        </div>
-                      </div>
-                    )}
                   </>
                 )}
               </div>
@@ -1424,7 +1500,6 @@ export default function ComprehensiveTCOCalculator() {
                                     const warnKey = `${seg.id}_${v.id}`;
                                     const isWarning = !!payloadWarnings[warnKey];
                                     const isOverloaded = currentVal > cap;
-                                    
                                     const multiplier = computeWeightedMultiplier(seg.stretches, v.allowOverloading ? currentVal : Math.min(currentVal, cap), v.type, dieselMatrix, evMatrix);
 
                                     return (
@@ -1455,28 +1530,10 @@ export default function ComprehensiveTCOCalculator() {
                                             <span className="num" style={{ fontSize: "10.5px", color: "var(--text-dim)", marginLeft: 6 }}>×{multiplier.toFixed(3)}</span>
                                           </div>
                                         </div>
-                                        
-                                        {isWarning && !v.allowOverloading && (
-                                          <div style={{ fontSize: "11px", color: "var(--bad)", marginTop: "6px" }}>
-                                            <AlertTriangle size={11} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} /> Capped at {cap.toFixed(1)}T — Enable "Allow Overloading" in vehicle profile to bypass.
-                                          </div>
-                                        )}
-                                        {isOverloaded && v.allowOverloading && (
-                                          <div style={{ fontSize: "11px", color: "var(--diesel)", marginTop: "6px" }}>
-                                            <AlertTriangle size={11} style={{ display: "inline", verticalAlign: "-1px", marginRight: 4 }} /> Overloaded by {(currentVal - cap).toFixed(1)}T — Base economy is penalized by {((currentVal - cap) * (v.overloadPenaltyPctPerTonne || 0)).toFixed(1)}%.
-                                          </div>
-                                        )}
                                       </div>
                                     );
                                   })}
                                 </div>
-                              </div>
-
-                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }}>
-                                <span style={{ fontWeight: 600, fontSize: "13px" }}>Surface / Traffic Allocation (Target: 100%)</span>
-                                <span className="num badge" style={{ background: activeStretchesSum !== 100 ? "rgba(239, 68, 68, 0.1)" : "rgba(16, 185, 129, 0.1)", color: activeStretchesSum !== 100 ? "var(--bad)" : "var(--good)" }}>
-                                  Sum: {activeStretchesSum}%
-                                </span>
                               </div>
 
                               <div className="stretch-grid">
@@ -1515,7 +1572,7 @@ export default function ComprehensiveTCOCalculator() {
         </div>
       )}
 
-      {/* SECTION 4: Efficiency Matrices Editor */}
+      {/* SECTION 4: Efficiency Matrices */}
       {activeTab === 'matrices' && (
         <div className="panel">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
@@ -1524,11 +1581,6 @@ export default function ComprehensiveTCOCalculator() {
               <button className={matrixEditMode === "diesel" ? "active" : ""} onClick={() => setMatrixEditMode("diesel")}>Diesel Matrices</button>
               <button className={matrixEditMode === "electric" ? "active" : ""} onClick={() => setMatrixEditMode("electric")}>EV Matrices</button>
             </div>
-          </div>
-
-          <div style={{ fontSize: "12px", color: "var(--text-dim)", marginBottom: "20px", lineHeight: 1.5 }}>
-            These matrices define the physics/efficiency multipliers applied to a vehicle's base economy based on road conditions, traffic, and cargo payload tiers. Values interpolate seamlessly for payloads falling between tiers.
-            Baseline 1.0 logic operates at zero-load ideal conditions for standard calculations.
           </div>
 
           <div style={{ overflowX: "auto" }}>
@@ -1613,22 +1665,20 @@ export default function ComprehensiveTCOCalculator() {
               <div className="kpi-grid">
                 {results.computedVehicles.map((v) => (
                   <div key={v.id} className="kpi-card" style={{ borderTop: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
-                    <div className="kpi-label">{v.name} ({v.fleetSizeRequired} Units{v.usesSegmentDemand ? " Demand Sized" : ""})</div>
+                    <div className="kpi-label">{v.name} ({v.fleetSizeRequired} Units)</div>
                     <div className="kpi-val num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>{inrCompact(v.npvTCOSum)}</div>
                     <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: "6px", marginBottom: "8px" }}>
                       <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Est. Rate per Trip</span>
                       <span className="num" style={{ fontWeight: 700, fontSize: "12.5px" }}>₹{Math.round(v.totalFreightRatePerTonneTrip)}/Ton</span>
                     </div>
                     <div className="kpi-sub">
-                      Turnaround: <strong className="num">{v.turnaroundCycleHrs.toFixed(2) } Hrs</strong><br />
+                      Turnaround: <strong className="num">{v.turnaroundCycleHrs.toFixed(2)} Hrs</strong><br />
                       Utilization: <strong className="num">{v.utilizationPctComputed.toFixed(1)}%</strong><br />
-                      Trips/Yr/Unit: <strong className="num">{Math.round(v.tripsPerYearPerVehicle)}</strong><br />
                       Effective Economy: <strong className="num">{v.avgRouteEconomy.toFixed(2)} {v.type === "diesel" ? "km/l" : "km/kWh"}</strong><br />
-                      Drivers: <strong className="num">{v.driversPerVehicle}/truck</strong><br />
                       {v.type === "electric" ? (
                         <>
-                          Stations: <strong className="num">{v.uniqueStationsCount} Stops</strong><br />
-                          Total Sized Chargers: <strong className="num">{v.totalChargersNeeded} Units</strong>
+                          Unique Stations: <strong className="num">{v.uniqueStationsCount} Stops</strong><br />
+                          Total Sized Dispensers: <strong className="num">{v.totalChargersNeeded} Plugs</strong>
                         </>
                       ) : (
                         <>
@@ -1640,14 +1690,58 @@ export default function ComprehensiveTCOCalculator() {
                 ))}
               </div>
 
+              {/* RESTORED GRAPH 1: Radar Chart Snapshot */}
+              {results.computedVehicles.length > 0 && (
+                <div style={{ marginBottom: "28px" }}>
+                  <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                    <Activity size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                    Fleet Comparison Snapshot
+                  </h3>
+                  <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "10px", padding: "16px" }}>
+                    <ResponsiveContainer width="100%" height={320}>
+                      <RadarChart cx="50%" cy="50%" outerRadius="75%" data={results.radarData}>
+                        <PolarGrid stroke="var(--border)" />
+                        <PolarAngleAxis dataKey="metric" stroke="var(--text-dim)" tick={{ fill: 'var(--text)', fontSize: 11, fontWeight: 600 }} />
+                        <PolarRadiusAxis angle={30} domain={[0, 100]} stroke="var(--border)" tick={{ fill: 'var(--text-dim)', fontSize: 9 }} />
+                        {results.computedVehicles.map(v => (
+                          <Radar key={v.id} name={v.name} dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} fill={colorForVehicle(v, results.computedVehicles)} fillOpacity={0.25} />
+                        ))}
+                        <Legend wrapperStyle={{ fontSize: 12, paddingTop: 10 }} />
+                        <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} />
+                      </RadarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
+              {/* RESTORED GRAPH 2: Time Allocation Breakdown */}
+              <div style={{ marginBottom: "28px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  <Clock size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                  Time Allocation Breakdown (% of Trip Cycle)
+                </h3>
+                <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "10px", padding: "16px" }}>
+                  <ResponsiveContainer width="100%" height={160}>
+                    <BarChart data={results.timeUtilizationData} layout="vertical" margin={{ top: 5, right: 25, left: 40, bottom: 5 }}>
+                      <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" horizontal={false} />
+                      <XAxis type="number" domain={[0, 100]} unit="%" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: 'var(--text-dim)' }} />
+                      <YAxis type="category" dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: 'var(--text-dim)' }} width={130} />
+                      <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `${Number(v).toFixed(1)}%`} />
+                      <Legend wrapperStyle={{ fontSize: 11 }} />
+                      <Bar dataKey="Driving" stackId="a" fill="#21bfa9" />
+                      <Bar dataKey="Load/Unload" stackId="a" fill="#8b5cf6" />
+                      <Bar dataKey="Refuel / Charge" stackId="a" fill="#ef4444" />
+                      <Bar dataKey="Rest/Queue" stackId="a" fill="#64748b" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
               <div style={{ marginTop: "16px", marginBottom: "24px" }}>
                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <DollarSign size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
                   Capital Deployment & Infrastructure Summary
                 </h3>
-                <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginBottom: "12px", lineHeight: 1.5 }}>
-                  "Loaded Capex/Truck" is the fully-loaded capital cost of putting one truck into service — its own on-road price plus that truck's proportional share of the charging network build-out.
-                </div>
                 <div style={{ overflowX: "auto" }}>
                   <table className="time-split-table">
                     <thead>
@@ -1673,30 +1767,34 @@ export default function ComprehensiveTCOCalculator() {
                   </table>
                 </div>
               </div>
-
-              {results.computedVehicles.length > 1 && (
-                <div style={{ marginTop: "32px" }}>
-                  <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>Fleet Comparison Snapshot</h3>
-                  <ResponsiveContainer width="100%" height={360}>
-                    <RadarChart data={results.radarData} outerRadius="75%">
-                      <PolarGrid stroke="var(--border)" />
-                      <PolarAngleAxis dataKey="metric" tick={{ fontSize: 11, fill: "var(--text-dim)" }} />
-                      <PolarRadiusAxis angle={30} domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" />
-                      <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} />
-                      <Legend wrapperStyle={{ fontSize: 12 }} />
-                      {results.computedVehicles.map((v) => (
-                        <Radar key={v.id} name={v.name} dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} fill={colorForVehicle(v, results.computedVehicles)} fillOpacity={0.15} strokeWidth={2} />
-                      ))}
-                    </RadarChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
             </div>
           )}
 
           {/* Sub-tab 2: Unit Economics */}
           {activeResultTab === 'segment' && (
             <div className="anim-fade">
+              {/* RESTORED GRAPH 3: Segment Freight Rates Bar Chart */}
+              <div style={{ marginBottom: "28px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  <BarChart3 size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
+                  Estimated Segment Freight Rates (₹/Ton)
+                </h3>
+                <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "10px", padding: "16px" }}>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <BarChart data={results.segmentFreightData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                      <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                      <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: 'var(--text-dim)' }} />
+                      <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fill: 'var(--text-dim)' }} tickFormatter={(v) => `₹${v}`} width={65} />
+                      <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `₹${v} / Ton`} />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      {results.computedVehicles.map(v => (
+                        <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)} radius={[4, 4, 0, 0]} />
+                      ))}
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </div>
+
               <div style={{ marginBottom: "24px" }}>
                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <Route size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
@@ -1727,12 +1825,11 @@ export default function ComprehensiveTCOCalculator() {
                           <td>{seg.from} → {seg.to} <span style={{ color: "var(--text-dim)", display: "block", fontSize: "11px", marginTop: "2px" }}>({seg.distance} km)</span></td>
                           {results.computedVehicles.map((v) => {
                             const segData = v.segmentCostPerTonneKm[segIdx];
-                            if (!segData || segData.freightRatePerTonneSeg === null) return <td key={v.id} className="num" style={{ color: "var(--text-dim)" }}>— <span style={{ fontSize: "10.5px" }}>(Empty payload)</span></td>;
+                            if (!segData || segData.freightRatePerTonneSeg === null) return <td key={v.id} className="num" style={{ color: "var(--text-dim)" }}>—</td>;
                             return (
                               <td key={v.id} className="num">
                                 <div style={{ fontWeight: 600, color: "var(--text)" }}>₹{Math.round(segData.freightRatePerTonneSeg)} / Ton</div>
                                 <div style={{ fontSize: "11px", color: "var(--text)", marginTop: "2px" }}>₹{segData.freightRatePerTonneKmSeg.toFixed(3)} / Ton-km</div>
-                                <div style={{ fontSize: "9.5px", color: "var(--text-dim)", marginTop: "4px" }}>Base cost: ₹{Math.round(segData.costPerTonneSeg)}/t</div>
                               </td>
                             );
                           })}
@@ -1742,45 +1839,6 @@ export default function ComprehensiveTCOCalculator() {
                   </table>
                 </div>
               </div>
-
-              <div style={{ marginTop: "32px", marginBottom: "32px" }}>
-                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-                   <BarChart3 size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-                   Estimated Segment Freight Rates (₹/Ton)
-                 </h3>
-                 <ResponsiveContainer width="100%" height={320}>
-                   <BarChart data={results.segmentFreightData} margin={{ top: 10, right: 30, left: 10, bottom: 20 }}>
-                     <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                     <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} />
-                     <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => `₹${v}`} />
-                     <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `₹${Math.round(v)}/Ton`} />
-                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                     {results.computedVehicles.map((v) => (
-                       <Bar key={v.id} dataKey={v.name} fill={colorForVehicle(v, results.computedVehicles)} radius={[4, 4, 0, 0]} />
-                     ))}
-                   </BarChart>
-                 </ResponsiveContainer>
-              </div>
-
-              <div style={{ marginTop: "32px", marginBottom: "32px" }}>
-                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-                   <Clock size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-                   Time Allocation Breakdown (% of Trip Cycle)
-                 </h3>
-                 <ResponsiveContainer width="100%" height={150}>
-                   <BarChart layout="vertical" data={results.timeUtilizationData} margin={{ top: 10, right: 30, left: 10, bottom: 10 }}>
-                     <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" horizontal={false} />
-                     <XAxis type="number" domain={[0, 100]} stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} tickFormatter={(v) => `${v}%`} />
-                     <YAxis dataKey="name" type="category" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: "var(--text-dim)" }} width={120} />
-                     <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `${Number(v).toFixed(1)}%`} />
-                     <Legend wrapperStyle={{ fontSize: 12 }} />
-                     <Bar dataKey="Driving" stackId="a" fill="var(--bev)" />
-                     <Bar dataKey="Load/Unload" stackId="a" fill="#8b5cf6" />
-                     <Bar dataKey="Refuel / Charge" stackId="a" fill="#ef4444" />
-                     <Bar dataKey="Rest/Queue" stackId="a" fill="#6b7280" />
-                   </BarChart>
-                 </ResponsiveContainer>
-              </div>
             </div>
           )}
 
@@ -1789,7 +1847,7 @@ export default function ComprehensiveTCOCalculator() {
             <div className="anim-fade">
               <div style={{ marginTop: "16px" }}>
                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-                  NPV Cost Accrual Over Project Horizon ({results.years} Years)
+                  Lifecycle Cost Accrual Over Project Horizon ({results.years} Years) {enableDiscounting ? "(Discounted NPV)" : "(Nominal)"}
                 </h3>
                 <ResponsiveContainer width="100%" height={340}>
                   <LineChart data={results.chartData} margin={{ top: 10, right: 30, left: 10, bottom: 25 }}>
@@ -1807,7 +1865,7 @@ export default function ComprehensiveTCOCalculator() {
 
               <div style={{ marginTop: "32px" }}>
                 <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-                  NPV Cost Category Breakdown Comparison
+                  Cost Category Breakdown Comparison
                 </h3>
                 <ResponsiveContainer width="100%" height={380}>
                   <BarChart
@@ -1815,13 +1873,13 @@ export default function ComprehensiveTCOCalculator() {
                       { category: "Capital & Infra", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.upfront }), {}) },
                       { category: "Fuel/Energy", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.fuelOrEnergy }), {}) },
                       { category: "EMI/Debt", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.emi }), {}) },
-                      { category: "Maint & Ins", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.maintenance + v.breakdown.insurance }), {}) },
-                      { category: "Wages & Drivers", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.wages }), {}) },
+                      { category: "AMC & Ins", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.maintenance + v.breakdown.insurance }), {}) },
+                      { category: "Drivers & Wages", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.wages }), {}) },
                       { category: "Operator Margin", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.operatorMargin }), {}) },
                       { category: "Tolls & Tyres", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.tolls + v.breakdown.tyres }), {}) },
                       { category: "Battery Swaps", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.batteryReplacements }), {}) },
-                      { category: "Depot Upkeep", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.infraMaintenance }), {}) },
-                      { category: "Misc", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.misc }), {}) }
+                      { category: "Infra Manpower", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.stationManpower }), {}) },
+                      { category: "Misc Overheads", ...results.computedVehicles.reduce((acc, v) => ({ ...acc, [v.name]: v.breakdown.misc }), {}) }
                     ]}
                     margin={{ top: 20, right: 30, left: 10, bottom: 70 }}
                   >
@@ -1839,42 +1897,65 @@ export default function ComprehensiveTCOCalculator() {
                 </ResponsiveContainer>
               </div>
 
-              <div style={{ marginTop: "32px", marginBottom: "16px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+              {/* RESTORED GRAPH 4: Side-by-Side Cost Breakdown Split (Donut Charts) */}
+              <div style={{ marginTop: "36px", marginBottom: "20px" }}>
+                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "16px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <PieChartIcon size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
                   Cost Breakdown Split (Per Vehicle)
                 </h3>
-                <div className="grid-auto-fit">
+                <div className="grid-2">
                   {results.computedVehicles.map((v) => {
-                    const pieDataRaw = [
-                      { name: "Capital & Infra", value: v.breakdown.upfront }, { name: "Fuel/Energy", value: v.breakdown.fuelOrEnergy },
-                      { name: "EMI/Debt", value: v.breakdown.emi }, { name: "Maintenance & Ins", value: v.breakdown.maintenance + v.breakdown.insurance },
-                      { name: "Wages & Drivers", value: v.breakdown.wages }, { name: "Tolls & Tyres", value: v.breakdown.tolls + v.breakdown.tyres },
-                      { name: "Battery Replacements", value: v.breakdown.batteryReplacements }, { name: "Depot Upkeep", value: v.breakdown.infraMaintenance },
-                      { name: "Misc Overheads", value: v.breakdown.misc }, { name: "Operator Margin", value: v.breakdown.operatorMargin }
-                    ].filter(d => d.value > 0);
-                    const totalValue = pieDataRaw.reduce((acc, d) => acc + d.value, 0);
-                    
+                    const rawItems = [
+                      { name: "Capital & Infra", value: Math.max(0, v.breakdown.upfront) },
+                      { name: "Fuel/Energy", value: Math.max(0, v.breakdown.fuelOrEnergy) },
+                      { name: "EMI/Debt", value: Math.max(0, v.breakdown.emi) },
+                      { name: "Maintenance & Ins", value: Math.max(0, v.breakdown.maintenance + v.breakdown.insurance) },
+                      { name: "Wages & Drivers", value: Math.max(0, v.breakdown.wages) },
+                      { name: "Tolls & Tyres", value: Math.max(0, v.breakdown.tolls + v.breakdown.tyres) },
+                      { name: "Battery Replacements", value: Math.max(0, v.breakdown.batteryReplacements) },
+                      { name: "Depot Upkeep", value: Math.max(0, v.breakdown.stationManpower + v.breakdown.infraLandLease) },
+                      { name: "Misc Overheads", value: Math.max(0, v.breakdown.misc) },
+                      { name: "Operator Margin", value: Math.max(0, v.breakdown.operatorMargin) },
+                    ].filter(item => item.value > 0);
+
+                    const totalSum = rawItems.reduce((sum, item) => sum + item.value, 0);
+
                     return (
-                      <div key={v.id} className="kpi-card pie-chart-container" style={{ borderLeft: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
-                        <div className="kpi-label" style={{ marginBottom: "16px", alignSelf: "flex-start" }}>{v.name} Total TCO Split</div>
-                        <ResponsiveContainer width="100%" height={240}>
+                      <div key={v.id} className="donut-card" style={{ borderTop: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
+                        <div style={{ fontSize: "12.5px", fontWeight: 700, textTransform: "uppercase", marginBottom: "12px", color: "var(--text-dim)" }}>
+                          {v.name} Total TCO Split
+                        </div>
+                        <ResponsiveContainer width="100%" height={220}>
                           <PieChart>
-                            <Pie data={pieDataRaw} cx="50%" cy="50%" innerRadius={65} outerRadius={95} paddingAngle={2} dataKey="value">
-                              {pieDataRaw.map((entry, index) => <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />)}
+                            <Pie
+                              data={rawItems}
+                              cx="50%"
+                              cy="50%"
+                              innerRadius={55}
+                              outerRadius={85}
+                              paddingAngle={3}
+                              dataKey="value"
+                            >
+                              {rawItems.map((entry, index) => (
+                                <Cell key={`cell-${index}`} fill={PIE_COLOR_MAP[entry.name] || '#9ca3af'} />
+                              ))}
                             </Pie>
-                            <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "12px", borderRadius: "8px" }} formatter={(value, name) => [inr(value), name]} />
+                            <Tooltip
+                              contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "12px" }}
+                              formatter={(val) => [`${inr(val)} (${totalSum > 0 ? ((val / totalSum) * 100).toFixed(1) : 0}%)`, "Cost"]}
+                            />
                           </PieChart>
                         </ResponsiveContainer>
-                        <div className="pie-legend">
-                          {pieDataRaw.map((entry, index) => {
-                            const pct = ((entry.value / totalValue) * 100).toFixed(1);
+
+                        <div className="donut-legend">
+                          {rawItems.map((item) => {
+                            const pct = totalSum > 0 ? ((item.value / totalSum) * 100).toFixed(1) : 0;
                             return (
-                              <div key={index} className="pie-legend-item">
-                                <span style={{ display: "inline-block", width: 8, height: 8, borderRadius: 2, background: PIE_COLORS[index % PIE_COLORS.length] }}></span>
-                                <span>{entry.name} ({pct}%)</span>
+                              <div key={item.name} className="donut-legend-item">
+                                <span className="donut-legend-color" style={{ background: PIE_COLOR_MAP[item.name] || '#9ca3af' }} />
+                                <span>{item.name} <strong className="num" style={{ color: "var(--text)" }}>({pct}%)</strong></span>
                               </div>
-                            )
+                            );
                           })}
                         </div>
                       </div>
@@ -1885,7 +1966,7 @@ export default function ComprehensiveTCOCalculator() {
             </div>
           )}
 
-          {/* Sub-tab 4: EV Infrastructure */}
+          {/* Sub-tab 4: EV Infrastructure & Sizing */}
           {activeResultTab === 'battery' && (
             <div className="anim-fade">
               {!results.computedVehicles.some(v => v.type === "electric") ? (
@@ -1896,36 +1977,157 @@ export default function ComprehensiveTCOCalculator() {
                 <>
                   <div style={{ background: "var(--panel-alt)", padding: "18px", borderRadius: "10px", marginBottom: "24px", border: "1px solid var(--border)" }}>
                     <div className="kpi-label" style={{ color: "var(--bev)" }}>
-                      <BatteryCharging size={16} style={{ marginRight: 6 }} /> Charging Sequence Trace
+                      <BatteryCharging size={16} style={{ marginRight: 6 }} /> Interactive Charging Sequence & Station Sizing Flow
                     </div>
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: "20px", marginTop: "12px" }}>
-                      {results.computedVehicles.map((v) => {
-                        if (v.type !== "electric") return null;
-                        return (
-                          <div key={v.id} style={{ flex: 1, minWidth: "300px" }}>
-                            <strong style={{ fontSize: "13px", display: "block", marginBottom: "4px" }}>{v.name} Charge Event Sequence:</strong>
-                            <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "8px" }}>
-                              * Simulates worst-case at End-of-Life SOH ({v.resolvedSOHReplacementLimit.toFixed(1)}%)
+                    <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "4px", marginBottom: "12px" }}>
+                      Connected charging sequence along the entire route. Modify dispenser counts or station labels inline directly on each node card to see immediate capex and TCO recalculation:
+                    </div>
+
+                    {results.computedVehicles.map((v) => {
+                      if (v.type !== "electric") return null;
+                      const dod = 100 - (v.safeSoCThreshold || 0);
+
+                      return (
+                        <div key={v.id} style={{ marginTop: "18px", borderTop: "1px solid var(--border)", paddingTop: "14px" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px", flexWrap: "wrap", gap: "8px" }}>
+                            <strong style={{ fontSize: "14px", color: colorForVehicle(v, results.computedVehicles) }}>{v.name}</strong>
+                            <div style={{ fontSize: "11px", color: "var(--text-dim)" }}>
+                              Usable DOD: <strong className="num" style={{ color: "var(--bev)" }}>{dod.toFixed(0)}%</strong> · Total Sized Dispensers: <strong className="num">{v.totalChargersNeeded} plugs</strong>
                             </div>
-                            {v.stopsLog.length === 0 ? (
-                              <div style={{ fontSize: "12.5px", color: "var(--text-dim)" }}>No charging stops required for route loop.</div>
-                            ) : (
-                              <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                                {v.stopsLog.map((log, lIdx) => (
-                                  <div key={lIdx} style={{ fontSize: "12px", background: "var(--panel)", padding: "10px", borderRadius: "8px", borderLeft: "3px solid var(--bev)" }}>
-                                    <strong>Stop {lIdx + 1}: {log.label}</strong> (at {log.km} km)<br />
-                                    <div style={{ color: "var(--text-dim)", marginTop: "4px" }}>
-                                      Leg Energy: <span className="num">{Math.round(log.energyLegConsumed)} kWh</span> |
-                                      SoC: <span className="num">{log.socBefore}%</span> → <span className="num">{log.socAfter}%</span> |
-                                      Time: <span className="num">{(log.chargeTimeHrs * 60).toFixed(0)} min</span>
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            )}
                           </div>
-                        );
-                      })}
+
+                          {v.stopsLog.length === 0 ? (
+                            <div style={{ fontSize: "12.5px", color: "var(--text-dim)" }}>No charging stops required for route loop.</div>
+                          ) : (
+                            <div className="flow-track">
+                              {/* Starting Node */}
+                              <div className="flow-node-card-interactive" style={{ minWidth: "160px", justifyContent: "center", alignItems: "center", textAlign: "center" }}>
+                                <div className="flow-dial start-dial">100%</div>
+                                <div style={{ fontSize: "12px", fontWeight: 700, marginTop: "6px" }}>Route Origin</div>
+                                <span className="badge badge-good" style={{ fontSize: "9px" }}>Departure</span>
+                                <div className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>0 km</div>
+                              </div>
+
+                              {/* Sequence of Charging Stops */}
+                              {v.stopsLog.map((log, lIdx) => {
+                                const matchedUnique = v.uniqueStationsList.find(st => st.key === log.key) || {};
+                                const override = chargingStationOverrides[v.id]?.[log.key] || {};
+                                const hasChargerOverride = Number.isFinite(override.chargers);
+                                const currentPlugs = matchedUnique.chargersSized || 1;
+                                const isBelow = hasChargerOverride && currentPlugs < matchedUnique.autoChargersSized;
+
+                                return (
+                                  <React.Fragment key={lIdx}>
+                                    <div className="flow-connector-interactive">
+                                      <div className="flow-connector-line" />
+                                      <div className="flow-connector-label">{Math.round(log.energyLegConsumed)} kWh</div>
+                                    </div>
+
+                                    <div className="flow-node-card-interactive">
+                                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "6px" }}>
+                                        <div className="flow-dial">{log.socBefore}%</div>
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                          <input
+                                            type="text"
+                                            value={typeof override.name === "string" ? override.name : ""}
+                                            placeholder={matchedUnique.originalLabel || log.label}
+                                            onChange={(e) => updateChargingStationOverride(v.id, log.key, "name", e.target.value)}
+                                            style={{ width: "100%", fontSize: "11px", fontWeight: 600, padding: "4px 6px", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
+                                          />
+                                          <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "4px" }}>
+                                            <span className={`badge ${log.isDepot ? "badge-info" : "badge-warn"}`} style={{ fontSize: "9px" }}>
+                                              {log.isDepot ? "Depot Terminal" : "Highway"}
+                                            </span>
+                                            <span className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>{log.km} km</span>
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      <div style={{ background: "var(--panel-alt)", padding: "8px", borderRadius: "6px", fontSize: "11px", display: "flex", flexDirection: "column", gap: "4px" }}>
+                                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                          <span style={{ color: "var(--text-dim)" }}>SoC Cycle:</span>
+                                          <span className="num"><strong>{log.socBefore}%</strong> → <strong>{log.socAfter}%</strong></span>
+                                        </div>
+                                        <div style={{ display: "flex", justifyContent: "space-between" }}>
+                                          <span style={{ color: "var(--text-dim)" }}>Charge Duration:</span>
+                                          <span className="num"><strong>{(log.chargeTimeHrs * 60).toFixed(0)} min</strong></span>
+                                        </div>
+                                        <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed var(--border)", paddingTop: "4px" }}>
+                                          <span style={{ color: "var(--text-dim)" }}>Station Capex:</span>
+                                          <span className="num" style={{ color: "var(--bev)" }}>{inr((matchedUnique.stationSetupCost || 0) + (matchedUnique.chargersCostSum || 0))}</span>
+                                        </div>
+                                      </div>
+
+                                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
+                                        <div style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>
+                                          Plugs (Auto: {matchedUnique.autoChargersSized}):
+                                        </div>
+                                        <div className="field-input" style={{ width: "70px" }}>
+                                          <input
+                                            type="number"
+                                            min="1"
+                                            step="1"
+                                            value={hasChargerOverride ? override.chargers : matchedUnique.autoChargersSized}
+                                            onChange={(e) => updateChargingStationOverride(v.id, log.key, "chargers", Math.max(1, Math.round(parseFloat(e.target.value) || 1)))}
+                                            style={{ width: "45px", padding: "4px" }}
+                                          />
+                                          <span className="field-suffix" style={{ paddingRight: 4 }}>#</span>
+                                        </div>
+                                        {(matchedUnique.isManualNameOverride || matchedUnique.isManualChargerOverride) && (
+                                          <button className="reset-btn" onClick={() => resetChargingStationOverride(v.id, log.key)} title="Reset to auto" style={{ padding: "4px 6px" }}>
+                                            <RotateCcw size={11} />
+                                          </button>
+                                        )}
+                                      </div>
+                                      {isBelow && <div style={{ fontSize: "9.5px", color: "var(--bad)", textAlign: "center" }}>⚠️ Sized below queue demand</div>}
+                                    </div>
+                                  </React.Fragment>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="grid-2" style={{ marginBottom: "24px" }}>
+                    <div className="kpi-card" style={{ background: "var(--panel)" }}>
+                      <div className="kpi-label"><Activity size={15} style={{ marginRight: 6 }} /> Battery SOH Degradation Timeline (% SOH)</div>
+                      <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginBottom: "8px" }}>
+                        Degradation step-down across project lifecycle with pack swap restorations.
+                      </div>
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart data={results.multiEvSohData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
+                          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                          <XAxis dataKey="year" tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" />
+                          <YAxis domain={[50, 100]} tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" width={35} />
+                          <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val}% SOH`} labelFormatter={(y) => `Year ${y}`} />
+                          <Legend wrapperStyle={{ fontSize: 11 }} />
+                          {results.evVehicles.map((v) => (
+                            <Line key={v.id} type="stepAfter" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
+                          ))}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+
+                    <div className="kpi-card" style={{ background: "var(--panel)" }}>
+                      <div className="kpi-label"><Battery size={15} style={{ marginRight: 6 }} /> Indicative Operational Range Over Lifecycle (km)</div>
+                      <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginBottom: "8px" }}>
+                        Effective usable range trajectory as the pack degrades and is restored over time.
+                      </div>
+                      <ResponsiveContainer width="100%" height={220}>
+                        <LineChart data={results.multiEvRangeData} margin={{ top: 10, right: 20, left: -10, bottom: 0 }}>
+                          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                          <XAxis dataKey="year" tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" />
+                          <YAxis tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" width={45} tickFormatter={(val) => `${val} km`} />
+                          <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val} km`} labelFormatter={(y) => `Year ${y}`} />
+                          <Legend wrapperStyle={{ fontSize: 11 }} />
+                          {results.evVehicles.map((v) => (
+                            <Line key={v.id} type="stepAfter" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
+                          ))}
+                        </LineChart>
+                      </ResponsiveContainer>
                     </div>
                   </div>
 
@@ -1946,89 +2148,9 @@ export default function ComprehensiveTCOCalculator() {
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Swaps Completed (Per Vehicle):</span><strong className="num" style={{ fontSize: "12px", fontWeight: "bold", color: "var(--bev)" }}>{v.replacementsPerVehicle} Swaps</strong></div>
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Total Fleet Battery Swaps:</span><strong className="num" style={{ fontSize: "12px" }}>{v.batterySetsReplacedCount} Packs</strong></div>
                           </div>
-                          {v.batteryReplacementLog.length > 0 ? (
-                            <div style={{ marginTop: "12px", fontSize: "11px", background: "var(--panel-alt)", padding: "10px", borderRadius: "8px", border: "1px dashed var(--border)" }}>
-                              <strong>Pack Replacement Schedule:</strong>
-                              <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginTop: "6px" }}>
-                                {v.batteryReplacementLog.map((log, rIdx) => (
-                                  <div key={rIdx} style={{ display: "flex", justifyContent: "space-between", color: "var(--text-dim)" }}><span>Swap #{rIdx + 1}: Year {log.year}</span><span>{log.sohAtReplacement.toFixed(1)}% SOH ({log.cycles} cycles)</span></div>
-                                ))}
-                              </div>
-                            </div>
-                          ) : (
-                            <div style={{ marginTop: "12px", fontSize: "11px", color: "var(--text-dim)", fontStyle: "italic" }}>No battery replacements during lifecycle.</div>
-                          )}
-                          {v.sohTimeline.length > 1 && (
-                            <div style={{ marginTop: "14px" }}>
-                              <div style={{ fontSize: "10.5px", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: "4px" }}>SOH over analysis window</div>
-                              <ResponsiveContainer width="100%" height={90}>
-                                <LineChart data={v.sohTimeline} margin={{ top: 4, right: 8, left: -24, bottom: 0 }}>
-                                  <XAxis dataKey="year" tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" />
-                                  <YAxis domain={[0, 100]} tick={{ fontSize: 9, fill: "var(--text-dim)" }} stroke="var(--border)" width={30} />
-                                  <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val}%`} labelFormatter={(y) => `Year ${y}`} />
-                                  <Line type="stepAfter" dataKey="soh" stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2} dot={false} />
-                                </LineChart>
-                              </ResponsiveContainer>
-                            </div>
-                          )}
                         </div>
                       );
                     })}
-                  </div>
-
-                  <div style={{ background: "var(--panel-alt)", padding: "18px", borderRadius: "10px", marginBottom: "24px", border: "1px solid var(--border)" }}>
-                    <div className="kpi-label" style={{ color: "var(--bev)" }}>
-                      <PlugZap size={16} style={{ marginRight: 6 }} /> Charging Station Sizing
-                    </div>
-                    <div style={{ overflowX: "auto", marginTop: "12px" }}>
-                      <table className="route-table" style={{ background: "var(--panel)", borderRadius: "8px" }}>
-                        <thead>
-                          <tr>
-                            <th>Stop Location</th><th style={{ textAlign: "right" }}>Cumulative Milepost</th><th style={{ textAlign: "center" }}>Infrastructure Type</th>
-                            <th style={{ textAlign: "center" }}>Auto-Sized Chargers</th><th style={{ textAlign: "center" }}>Override Chargers</th>
-                            <th style={{ textAlign: "center" }}>Manual Stop Name</th><th style={{ textAlign: "right" }}>Cost Profile</th><th style={{ textAlign: "center" }}>Reset</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {results.computedVehicles.flatMap(v => {
-                            if (v.type !== "electric") return [];
-                            return v.uniqueStationsList.map((st, sIdx) => {
-                              const override = chargingStationOverrides[v.id]?.[st.key] || {};
-                              const hasChargerOverride = Number.isFinite(override.chargers);
-                              const effectiveChargers = st.chargersSized;
-                              const belowAuto = hasChargerOverride && effectiveChargers < st.autoChargersSized;
-
-                              return (
-                                <tr key={`${v.id}_s_${sIdx}`}>
-                                  <td><strong>{v.name}</strong> - {st.label} {(st.isManualNameOverride || st.isManualChargerOverride) && (<div style={{ fontSize: "10px", color: "var(--bev)", marginTop: "3px" }}>Manual override active</div>)}</td>
-                                  <td className="num" style={{ textAlign: "right" }}>{st.km} km</td>
-                                  <td style={{ textAlign: "center" }}><span className={`badge ${st.isDepot ? "badge-info" : "badge-warn"}`}>{st.isDepot ? "Terminal Depot" : "Highway charger"}</span></td>
-                                  <td className="num" style={{ textAlign: "center" }}>{st.autoChargersSized} Plugs</td>
-                                  <td style={{ minWidth: "145px" }}>
-                                    <div className="field-input" style={{ width: "135px", margin: "0 auto" }}>
-                                      <input type="number" min="1" step="1" value={hasChargerOverride ? override.chargers : st.autoChargersSized} onChange={(e) => { updateChargingStationOverride(v.id, st.key, "chargers", Math.max(1, Math.round(parseFloat(e.target.value) || 1))); }} style={{ width: "90px" }} />
-                                      <span className="field-suffix">plugs</span>
-                                    </div>
-                                    {belowAuto && <div style={{ fontSize: "9.5px", color: "var(--bad)", textAlign: "center", marginTop: "3px" }}>Below calculated need</div>}
-                                  </td>
-                                  <td style={{ minWidth: "190px" }}>
-                                    <div className="field-input" style={{ width: "180px", margin: "0 auto" }}>
-                                      <input type="text" value={typeof override.name === "string" ? override.name : ""} placeholder={st.originalLabel} onChange={(e) => updateChargingStationOverride(v.id, st.key, "name", e.target.value)} style={{ width: "165px", textAlign: "left" }} />
-                                    </div>
-                                  </td>
-                                  <td className="num" style={{ textAlign: "right" }}>{inr(st.stationSetupCost + st.chargersCostSum)}</td>
-                                  <td style={{ textAlign: "center" }}>
-                                    {(st.isManualNameOverride || st.isManualChargerOverride) ? (
-                                      <button className="reset-btn" type="button" onClick={() => resetChargingStationOverride(v.id, st.key)} style={{ padding: "6px 8px", margin: "0 auto" }}><RotateCcw size={13} /></button>
-                                    ) : (<span style={{ color: "var(--text-dim)", fontSize: "11px" }}>Auto</span>)}
-                                  </td>
-                                </tr>
-                              );
-                            });
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
                   </div>
                 </>
               )}
