@@ -2,7 +2,7 @@ import React, { useState, useMemo } from "react";
 import {
   Truck, Zap, Fuel, BatteryCharging, TrendingUp,
   RotateCcw, PlugZap, Plus, Trash2, MapPin, Settings, Sun, Moon, AlertTriangle, CheckCircle2,
-  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon, Target, Activity, Battery, Users, ToggleLeft, ToggleRight
+  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon, Target, Activity, Battery, Users, ToggleLeft, ToggleRight, Link2, Unlink
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -133,6 +133,30 @@ function getPayloadCap(v) {
   return Math.max(0, v.gvwr - v.tractorWeight - v.trailerWeight) / 1000;
 }
 
+// -----------------------------------------------------------------------
+// NON-LINEAR BATTERY DEGRADATION MODEL
+// Two-stage "knee" SOH curve as a function of cycle-life fraction consumed,
+// combined with a Depth-of-Discharge (DoD) stress model for cycle life.
+// -----------------------------------------------------------------------
+function sohAtCycleFraction(fractionOfLife, kneeSOH, kneeCycleFraction, eolSOH, postKneeExponent) {
+  const f = Math.min(1, Math.max(0, fractionOfLife));
+  const kf = Math.min(0.98, Math.max(0.02, kneeCycleFraction));
+  if (f <= kf) {
+    // Stage 1: slow, roughly-linear fade from 100% down to the knee SOH
+    return 100 - (100 - kneeSOH) * (f / kf);
+  }
+  // Stage 2: accelerating fade from the knee down to end-of-life SOH
+  const postFrac = (f - kf) / Math.max(0.0001, 1 - kf);
+  return kneeSOH - (kneeSOH - eolSOH) * Math.pow(postFrac, Math.max(1, postKneeExponent));
+}
+
+// Cycle life scales with DoD via a stress/Wohler-style relationship:
+// shallower cycles (lower DoD) survive proportionally more cycles than deep ones.
+function cycleLifeForDoD(refCycleLifeAt100DoD, avgDoDFraction, dodStressExponentK) {
+  const safeDoD = Math.min(1, Math.max(0.05, avgDoDFraction));
+  return Math.max(1, (refCycleLifeAt100DoD || 1500) * Math.pow(1 / safeDoD, dodStressExponentK || 1.1));
+}
+
 const generateDefaultStretches = () => {
   const stretches = [];
   ROAD_TYPES.forEach((road) => {
@@ -164,6 +188,24 @@ function colorForVehicle(v, allVehicles) {
   return palette[sameTypeIdx % palette.length];
 }
 
+// Builds the full ordered sequence of route stops for the flow visual: every
+// route waypoint (load/unload point) plus every charging event, merged and
+// de-duplicated by cumulative km, so non-charging stops are visible too.
+function buildFlowSequence(v, routeSegments) {
+  const waypoints = [];
+  let cum = 0;
+  routeSegments.forEach((seg) => {
+    cum += seg.distance;
+    waypoints.push({ km: Math.round(cum), name: seg.to });
+  });
+  const chargeKms = new Set((v.stopsLog || []).map((l) => l.km));
+  const passThroughs = waypoints
+    .filter((w) => !chargeKms.has(w.km))
+    .map((w) => ({ type: "waypoint", km: w.km, name: w.name }));
+  const chargeNodes = (v.stopsLog || []).map((l) => ({ type: "charge", km: l.km, log: l }));
+  return [...passThroughs, ...chargeNodes].sort((a, b) => a.km - b.km);
+}
+
 const INITIAL_VEHICLES = [
   {
     id: "v-diesel-1", name: "Standard Diesel 55T", type: "diesel", purchasePrice: 4000000, gstRate: 18, registrationFee: 135000,
@@ -180,7 +222,8 @@ const INITIAL_VEHICLES = [
     id: "v-bev-1", name: "Electric BEV 55T", type: "electric", purchasePrice: 9000000, gstRate: 5, registrationFee: 135000,
     trailerCost: 1800000, vehicleMiscCost: 0, tractorWeight: 9500, trailerWeight: 9000, gvwr: 55000,
     baseUnloadedEconomy: 0.6, baseLoadedEconomy: 0.31, batteryCapacity: 282, batteryReplacementCost: 4000000,
-    batteryDegradationPerCycle: 0.0035, batterySOHThreshold: 75, maintCostPerKm: 2.5, insuranceRatePct: 1.5,
+    refCycleLifeAt100DoD: 1500, dodStressExponentK: 1.1, kneeSOH: 88, kneeCycleFraction: 0.7, postKneeExponent: 1.6,
+    batterySOHThreshold: 75, maintCostPerKm: 2.5, insuranceRatePct: 1.5,
     residualPct: 7, allowOverloading: false, overloadPenaltyPctPerTonne: 2.0, financing: "emi", downPaymentPct: 20,
     interestRate: 10.0, loanTenure: 7, driverSalaryMonthly: 45000, driversPerVehicle: 2, tollCostPerTrip: 7350,
     tyresFront: 2, tyreCostFront: 21000, tyreLifeFront: 45000, tyresRear: 4, tyreCostRear: 22000, tyreLifeRear: 50000,
@@ -359,6 +402,22 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     ? Math.min(95, Math.max(v.batterySOHThreshold, criticalSOHLimit))
     : (v.batterySOHThreshold || 75);
 
+  // --- Non-linear degradation inputs: energy-weighted average Depth-of-Discharge
+  // across this loop's charging events, and the resulting DoD-adjusted cycle life.
+  let avgDoDFraction = (100 - (v.safeSoCThreshold || 10)) / 100;
+  let cyclesToEOL = 1;
+  if (v.type === "electric") {
+    let totalDoDWeighted = 0;
+    let totalLegEnergy = 0;
+    stopsLog.forEach((log) => {
+      const dodEvent = Math.max(0.01, (log.startSoCWindow - parseFloat(log.socBefore)) / 100);
+      totalDoDWeighted += dodEvent * Math.max(0.0001, log.energyLegConsumed);
+      totalLegEnergy += Math.max(0.0001, log.energyLegConsumed);
+    });
+    if (totalLegEnergy > 0) avgDoDFraction = totalDoDWeighted / totalLegEnergy;
+    cyclesToEOL = cycleLifeForDoD(v.refCycleLifeAt100DoD, avgDoDFraction, v.dodStressExponentK);
+  }
+
   const chargingStopsCount = stopsLog.length;
   const totalAnnualFixedDowntimeHrs = (v.scheduledDowntimeDays * 24) + v.unscheduledDowntimeHrs;
   const fullTurnaroundCycleHrs = totalTripDrivingHrs + loadingUnloadingTimePerTrip + chargingDowntimeHrs + refuelingDowntimeHrs + generalRestDowntimeHrs;
@@ -389,9 +448,15 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   const totalDistanceAcrossFleetYear = totalTripsAcrossFleetYear * totalTripDistance;
   const annualTonneKmPerVehicle = tripsPerYearPerVehicle * tonneKmPerTrip;
   const annualTonneKmFleet = annualTonneKmPerVehicle * fleetSizeRequired;
+  const annualCyclesPerVehicle = tripsPerYearPerVehicle * chargingStopsCount;
 
   // -------------------------------------------------------------------------
   // CHARGING STATION SIZING & CAPEX CALCULATION
+  // Supports two manual overrides per station:
+  //  - chargers = 0: station is fully zeroed out (no capex, no opex, no plugs)
+  //  - mergedInto = <key>: this stop shares physical infrastructure with
+  //    another named station; its own capex drops to zero and its charging
+  //    demand is folded into the target station's plug-sizing calculation.
   // -------------------------------------------------------------------------
   let uniqueStationsCount = 0;
   let totalChargersNeeded = 0;
@@ -402,30 +467,53 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     const defaultBaselinePlugs = v.defaultChargersPerStation || 5;
     const STATION_DAILY_UPTIME_HRS = 22;
     const dailyLoopsAcrossFleet = totalTripsAcrossFleetYear / (workingDaysPerMonth * 12);
+    const vehicleOverrides = chargingStationOverrides[v.id] || {};
+    const stationKeys = Object.keys(uniqueChargingStopsMap);
 
-    Object.keys(uniqueChargingStopsMap).forEach((key) => {
+    // Resolve each key's merge root (one level; ignore invalid/self-referential targets)
+    const rootOfKey = {};
+    const demandByKey = {};
+    stationKeys.forEach((key) => {
       const rawStop = uniqueChargingStopsMap[key];
+      demandByKey[key] = dailyLoopsAcrossFleet * rawStop.chargesPerLoop;
+      const ov = vehicleOverrides[key] || {};
+      const target = ov.mergedInto;
+      rootOfKey[key] = (target && target !== key && uniqueChargingStopsMap[target]) ? target : key;
+    });
+    const combinedDemandByRoot = {};
+    stationKeys.forEach((key) => {
+      const root = rootOfKey[key];
+      combinedDemandByRoot[root] = (combinedDemandByRoot[root] || 0) + demandByKey[key];
+    });
+
+    stationKeys.forEach((key) => {
+      const rawStop = uniqueChargingStopsMap[key];
+      const stopOverride = vehicleOverrides[key] || {};
+      const root = rootOfKey[key];
+      const isMergedAway = root !== key;
+
       const chargeSlotsPerDayPerCharger = STATION_DAILY_UPTIME_HRS / Math.max(0.1, rawStop.timePerChargeHrs);
-      const dailyChargesAtThisLocation = dailyLoopsAcrossFleet * rawStop.chargesPerLoop;
-      const autoCalculatedDemandPlugs = Math.max(1, Math.ceil(dailyChargesAtThisLocation / chargeSlotsPerDayPerCharger));
-      
-      const autoChargersSized = Math.max(defaultBaselinePlugs, autoCalculatedDemandPlugs);
+      const combinedDemand = combinedDemandByRoot[root] || 0;
+      const autoCalculatedDemandPlugs = Math.max(1, Math.ceil(combinedDemand / chargeSlotsPerDayPerCharger));
+      const autoChargersSized = isMergedAway ? 0 : Math.max(defaultBaselinePlugs, autoCalculatedDemandPlugs);
 
-      const stopOverride = chargingStationOverrides[v.id]?.[key] || {};
       const hasChargerOverride = Number.isFinite(stopOverride.chargers);
-      const chargersSized = hasChargerOverride ? Math.max(1, Math.round(stopOverride.chargers)) : autoChargersSized;
+      const chargersSized = isMergedAway ? 0 : (hasChargerOverride ? Math.max(0, Math.round(stopOverride.chargers)) : autoChargersSized);
       const displayLabel = typeof stopOverride.name === "string" && stopOverride.name.trim() ? stopOverride.name.trim() : rawStop.label;
+      const mergedIntoLabel = isMergedAway ? ((uniqueChargingStopsMap[root] || {}).label) : null;
 
-      uniqueStationsCount += 1;
-      totalChargersNeeded += chargersSized;
+      if (chargersSized > 0) {
+        uniqueStationsCount += 1;
+        totalChargersNeeded += chargersSized;
+        capitalSetupInfra += (v.stationCost + (chargersSized * v.chargerCost)) * (1 - (v.infrastructureTaxCredit || 0) / 100);
+      }
 
       uniqueStationsList.push({
         ...rawStop, label: displayLabel, originalLabel: rawStop.label, chargersSized, autoChargersSized,
-        isManualChargerOverride: hasChargerOverride, isManualNameOverride: displayLabel !== rawStop.label,
-        stationSetupCost: v.stationCost, chargersCostSum: chargersSized * v.chargerCost
+        isManualChargerOverride: hasChargerOverride && !isMergedAway, isManualNameOverride: displayLabel !== rawStop.label,
+        isMergedAway, mergedIntoKey: isMergedAway ? root : null, mergedIntoLabel,
+        stationSetupCost: chargersSized > 0 ? v.stationCost : 0, chargersCostSum: chargersSized * v.chargerCost
       });
-
-      capitalSetupInfra += (v.stationCost + (chargersSized * v.chargerCost)) * (1 - (v.infrastructureTaxCredit || 0) / 100);
     });
   }
 
@@ -469,7 +557,7 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   };
 
   let currentSOH = 100;
-  let mileageSinceLastReplacement = 0;
+  let cyclesSinceLastReplacement = 0;
   let batterySetsReplacedCount = 0;
   let batteryReplacementLog = [];
   let sohTimeline = [];
@@ -509,28 +597,26 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
 
     let yearBatteryCost = 0;
     if (v.type === "electric") {
-      const annualMileagePerVehicle = totalDistanceAcrossFleetYear / fleetSizeRequired;
-      const rangePerCharge = (v.batteryCapacity * (100 - v.safeSoCThreshold) / 100) * avgRouteEconomy;
-      const cyclesToFailure = (100 - resolvedSOHReplacementLimit) / v.batteryDegradationPerCycle;
-      const lifespanKm = cyclesToFailure * rangePerCharge;
-
-      let availableMileage = annualMileagePerVehicle;
-      while (availableMileage > 0) {
-        let mileageToLimit = lifespanKm - mileageSinceLastReplacement;
-        if (availableMileage >= mileageToLimit) {
+      // Cycle-based, DoD-adjusted, two-stage (knee) degradation tracking.
+      let availableCycles = annualCyclesPerVehicle;
+      while (availableCycles > 0) {
+        const cyclesToLimit = cyclesToEOL - cyclesSinceLastReplacement;
+        if (availableCycles >= cyclesToLimit) {
           yearBatteryCost += v.batteryReplacementCost * fleetSizeRequired * multAMC;
           batterySetsReplacedCount += fleetSizeRequired;
           batteryReplacementLog.push({
-            year: t, sohAtReplacement: resolvedSOHReplacementLimit, cycles: Math.round(cyclesToFailure), mileageSinceLastReplacement: Math.round(lifespanKm),
+            year: t, sohAtReplacement: resolvedSOHReplacementLimit, cycles: Math.round(cyclesToEOL),
+            avgDoDPct: Math.round(avgDoDFraction * 100),
           });
-          availableMileage -= mileageToLimit;
-          mileageSinceLastReplacement = 0;
+          availableCycles -= cyclesToLimit;
+          cyclesSinceLastReplacement = 0;
         } else {
-          mileageSinceLastReplacement += availableMileage;
-          availableMileage = 0;
+          cyclesSinceLastReplacement += availableCycles;
+          availableCycles = 0;
         }
       }
-      currentSOH = 100 - (mileageSinceLastReplacement / lifespanKm) * (100 - resolvedSOHReplacementLimit);
+      const cycleFraction = cyclesSinceLastReplacement / Math.max(1, cyclesToEOL);
+      currentSOH = sohAtCycleFraction(cycleFraction, v.kneeSOH || 88, v.kneeCycleFraction || 0.7, resolvedSOHReplacementLimit, v.postKneeExponent || 1.6);
       const roundedSOH = Math.round(currentSOH * 10) / 10;
       sohTimeline.push({ year: t, soh: roundedSOH });
       rangeTimeline.push({ year: t, range: Math.round(baseOperationalRangeAtStart * (roundedSOH / 100)) });
@@ -616,7 +702,7 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     segmentOverloads, maxTheoreticalRange: baseTheoreticalRange, operationalRangeAtStart: baseOperationalRangeAtStart, operationalRangeAtSOHLimit, replacementsPerVehicle: batteryReplacementLog.length,
     totalUpfrontGSTPrice, loanUpfrontDownpayment, loanPrincipalDebt, loanAnnualEMI, loanMonthlyEMI: loanAnnualEMI / 12,
     capitalSetupInfra, infraCapexPerTruck, loadedCapexPerTruckOnRoad, loadedCapexPerTruckEquity, totalFleetUpfrontCapex, totalFleetOnRoadCapex,
-    autoStationManpower, totalMonthlyStationManpower
+    autoStationManpower, totalMonthlyStationManpower, avgDoDFraction, cyclesToEOL
   };
 }
 
@@ -735,7 +821,9 @@ export default function ComprehensiveTCOCalculator() {
       baseDefault.safeFuelThreshold = 15; baseDefault.refuelTimeMins = 20;
     } else {
       baseDefault.batteryCapacity = 500; baseDefault.batteryReplacementCost = 3800000;
-      baseDefault.batteryDegradationPerCycle = 0.006; baseDefault.batterySOHThreshold = 75;
+      baseDefault.refCycleLifeAt100DoD = 1200; baseDefault.dodStressExponentK = 1.1;
+      baseDefault.kneeSOH = 88; baseDefault.kneeCycleFraction = 0.7; baseDefault.postKneeExponent = 1.6;
+      baseDefault.batterySOHThreshold = 75;
       baseDefault.safeSoCThreshold = 10; baseDefault.stationCost = 2500000;
       baseDefault.chargerCost = 1500000; baseDefault.defaultChargersPerStation = 5; baseDefault.infrastructureTaxCredit = 0;
       baseDefault.chargeSpeedKW = 150; baseDefault.chargingTimeMarginPct = 10; baseDefault.electricityRate = 8.5;
@@ -1062,6 +1150,7 @@ export default function ComprehensiveTCOCalculator() {
         .badge-good { background: rgba(16, 185, 129, 0.1); color: var(--good); border: 1px solid rgba(16, 185, 129, 0.2); }
         .badge-warn { background: rgba(226, 149, 50, 0.1); color: var(--diesel); border: 1px solid rgba(226, 149, 50, 0.2); }
         .badge-info { background: rgba(33, 196, 175, 0.1); color: var(--bev); border: 1px solid rgba(33, 196, 175, 0.2); }
+        .badge-muted { background: rgba(148, 163, 184, 0.12); color: var(--text-dim); border: 1px solid var(--border); }
         .optimizer-box { background: var(--panel-alt); border: 1px dashed var(--bev); border-radius: 10px; padding: 14px; margin-top: 12px; }
         .optimizer-result { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px; font-size: 12px; }
         .mini-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--bev); color: #0c0e0f; border: none; padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
@@ -1077,12 +1166,14 @@ export default function ComprehensiveTCOCalculator() {
         .time-split-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
         .time-split-table td:first-child { text-align: left; }
 
-        .flow-track { display: flex; align-items: stretch; overflow-x: auto; gap: 12px; padding: 16px 6px 24px; scrollbar-width: thin; }
-        .flow-node-card-interactive { min-width: 250px; background: var(--panel); border: 1.5px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow-sm); position: relative; transition: all 0.2s ease; }
+        .flow-track { display: flex; flex-wrap: wrap; align-items: stretch; gap: 12px 8px; padding: 16px 6px 24px; }
+        .flow-node-card-interactive { min-width: 230px; background: var(--panel); border: 1.5px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow-sm); position: relative; transition: all 0.2s ease; }
         .flow-node-card-interactive:hover { border-color: var(--bev); box-shadow: var(--shadow-md); }
+        .flow-node-card-interactive.waypoint-card { min-width: 150px; background: var(--panel-alt); align-items: center; text-align: center; }
         .flow-dial { width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 12px; border: 3px solid var(--bev); background: var(--panel-alt); box-shadow: 0 0 0 3px rgba(33,196,175,0.08); flex-shrink: 0; }
         .flow-dial.start-dial { border-color: var(--good); box-shadow: 0 0 0 3px rgba(16,185,129,0.08); }
-        .flow-connector-interactive { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 70px; position: relative; padding: 0 4px; }
+        .flow-dial.waypoint-dial { border-color: var(--text-dim); box-shadow: none; background: var(--panel); }
+        .flow-connector-interactive { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 46px; position: relative; padding: 0 4px; }
         .flow-connector-line { width: 100%; height: 2px; background: repeating-linear-gradient(90deg, var(--border) 0, var(--border) 6px, transparent 6px, transparent 11px); position: relative; }
         .flow-connector-line::after { content: ''; position: absolute; right: 0; top: -4px; border-style: solid; border-width: 5px 0 5px 8px; border-color: transparent transparent transparent var(--text-dim); }
         .flow-connector-label { font-size: 10px; color: var(--text-dim); margin-top: 6px; text-align: center; white-space: nowrap; font-family: 'JetBrains Mono', monospace; }
@@ -1110,6 +1201,7 @@ export default function ComprehensiveTCOCalculator() {
             setRouteSegments(DEFAULT_ROUTE.map((s, i) => ({ ...s, monthlyTonnage: i === 1 ? 0 : 85000 })));
             setVehicles(INITIAL_VEHICLES);
             setOptimizerResults({});
+            setChargingStationOverrides({});
             resetMatrices();
           }}>
             <RotateCcw size={15} /> Reset
@@ -1271,12 +1363,21 @@ export default function ComprehensiveTCOCalculator() {
 
                 {v.type === "electric" && (
                   <>
-                    <div className="section-tag">Battery & Cycle Sizing</div>
+                    <div className="section-tag">Battery Sizing</div>
                     <Field label="Battery Pack Sizing" value={v.batteryCapacity} onChange={(val) => updateVehicleProp(v.id, "batteryCapacity", val)} suffix="kWh" step={25} />
                     <Field label="Pack Replacement Cost" value={v.batteryReplacementCost} onChange={(val) => updateVehicleProp(v.id, "batteryReplacementCost", val)} suffix="₹" step={100000} />
-                    <Field label="Cycle-wise SOH Degradation" value={v.batteryDegradationPerCycle} onChange={(val) => updateVehicleProp(v.id, "batteryDegradationPerCycle", val)} suffix="%" step={0.001} />
 
-                    <div className="field">
+                    <div className="section-tag">Non-Linear Degradation (DoD-Stress + Knee Curve)</div>
+                    <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "10px", lineHeight: 1.5 }}>
+                      Cycle life scales with how deep each charge cycle is (route Depth-of-Discharge), and SOH fades slowly until a "knee" point, then accelerates toward end-of-life.
+                    </div>
+                    <Field label="Reference Cycle Life @ 100% DoD" value={v.refCycleLifeAt100DoD} onChange={(val) => updateVehicleProp(v.id, "refCycleLifeAt100DoD", val)} suffix="cycles" step={50} min={1} />
+                    <Field label="DoD Stress Exponent (k)" value={v.dodStressExponentK} onChange={(val) => updateVehicleProp(v.id, "dodStressExponentK", val)} suffix="" step={0.05} min={0.1} />
+                    <Field label="Knee Point SOH" value={v.kneeSOH} onChange={(val) => updateVehicleProp(v.id, "kneeSOH", val)} suffix="%" step={1} min={v.batterySOHThreshold || 0} max={99} />
+                    <Field label="Knee Cycle Fraction (of life)" value={v.kneeCycleFraction} onChange={(val) => updateVehicleProp(v.id, "kneeCycleFraction", val)} suffix="×life" step={0.05} min={0.05} max={0.95} />
+                    <Field label="Post-Knee Acceleration Exponent" value={v.postKneeExponent} onChange={(val) => updateVehicleProp(v.id, "postKneeExponent", val)} suffix="" step={0.1} min={1} />
+
+                    <div className="field" style={{ marginTop: 6 }}>
                       <div style={{ display: "flex", flexDirection: "column" }}>
                         <span className="field-label" style={{ fontWeight: 600 }}>Adaptive Lifecycle Replacement Sizing</span>
                         <span style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Compute physical replacement limit dynamically based on route range limits?</span>
@@ -1288,6 +1389,13 @@ export default function ComprehensiveTCOCalculator() {
                       <Field label="Manual Target SOH Trigger" value={v.batterySOHThreshold} onChange={(val) => updateVehicleProp(v.id, "batterySOHThreshold", val)} suffix="%" step={1} />
                     )}
                     <Field label="Reserve Safe Limit Margin (Reserve SoC)" value={v.safeSoCThreshold} onChange={(val) => updateVehicleProp(v.id, "safeSoCThreshold", val)} suffix="%" step={1} />
+
+                    {currentComputed && (
+                      <div style={{ background: "var(--panel-alt)", border: "1px dashed var(--border)", borderRadius: "8px", padding: "10px 12px", marginTop: "6px", fontSize: "11.5px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ color: "var(--text-dim)" }}>Avg. Route Depth-of-Discharge:</span><strong className="num">{(currentComputed.avgDoDFraction * 100).toFixed(1)}%</strong></div>
+                        <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ color: "var(--text-dim)" }}>DoD-Adjusted Cycle Life:</span><strong className="num">{Math.round(currentComputed.cyclesToEOL)} cycles</strong></div>
+                      </div>
+                    )}
                   </>
                 )}
 
@@ -1980,12 +2088,13 @@ export default function ComprehensiveTCOCalculator() {
                       <BatteryCharging size={16} style={{ marginRight: 6 }} /> Interactive Charging Sequence & Station Sizing Flow
                     </div>
                     <div style={{ fontSize: "11.5px", color: "var(--text-dim)", marginTop: "4px", marginBottom: "12px" }}>
-                      Connected charging sequence along the entire route. Modify dispenser counts or station labels inline directly on each node card to see immediate capex and TCO recalculation:
+                      Full route sequence including load/unload-only stops. Merge a station into another to share its infrastructure (zero capex/opex) when the same physical charger is reused elsewhere on the loop:
                     </div>
 
                     {results.computedVehicles.map((v) => {
                       if (v.type !== "electric") return null;
                       const dod = 100 - (v.safeSoCThreshold || 0);
+                      const flowSequence = buildFlowSequence(v, routeSegments);
 
                       return (
                         <div key={v.id} style={{ marginTop: "18px", borderTop: "1px solid var(--border)", paddingTop: "14px" }}>
@@ -1996,8 +2105,8 @@ export default function ComprehensiveTCOCalculator() {
                             </div>
                           </div>
 
-                          {v.stopsLog.length === 0 ? (
-                            <div style={{ fontSize: "12.5px", color: "var(--text-dim)" }}>No charging stops required for route loop.</div>
+                          {flowSequence.length === 0 ? (
+                            <div style={{ fontSize: "12.5px", color: "var(--text-dim)" }}>No stops configured on this route loop.</div>
                           ) : (
                             <div className="flow-track">
                               {/* Starting Node */}
@@ -2008,19 +2117,41 @@ export default function ComprehensiveTCOCalculator() {
                                 <div className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>0 km</div>
                               </div>
 
-                              {/* Sequence of Charging Stops */}
-                              {v.stopsLog.map((log, lIdx) => {
+                              {/* Sequence of stops: charging events + plain load/unload waypoints */}
+                              {flowSequence.map((node, lIdx) => {
+                                const prevKm = lIdx === 0 ? 0 : flowSequence[lIdx - 1].km;
+                                const deltaKm = node.km - prevKm;
+
+                                if (node.type === "waypoint") {
+                                  return (
+                                    <React.Fragment key={`wp-${node.km}-${node.name}`}>
+                                      <div className="flow-connector-interactive">
+                                        <div className="flow-connector-line" />
+                                        <div className="flow-connector-label">{Math.round(deltaKm)} km</div>
+                                      </div>
+                                      <div className="flow-node-card-interactive waypoint-card">
+                                        <div className="flow-dial waypoint-dial"><MapPin size={18} color="var(--text-dim)" /></div>
+                                        <div style={{ fontSize: "12px", fontWeight: 700 }}>{node.name}</div>
+                                        <span className="badge badge-muted" style={{ fontSize: "9px" }}>Load / Unload Only</span>
+                                        <div className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>{node.km} km</div>
+                                      </div>
+                                    </React.Fragment>
+                                  );
+                                }
+
+                                const log = node.log;
                                 const matchedUnique = v.uniqueStationsList.find(st => st.key === log.key) || {};
                                 const override = chargingStationOverrides[v.id]?.[log.key] || {};
                                 const hasChargerOverride = Number.isFinite(override.chargers);
-                                const currentPlugs = matchedUnique.chargersSized || 1;
-                                const isBelow = hasChargerOverride && currentPlugs < matchedUnique.autoChargersSized;
+                                const currentPlugs = matchedUnique.chargersSized || 0;
+                                const isBelow = hasChargerOverride && !matchedUnique.isMergedAway && currentPlugs < matchedUnique.autoChargersSized;
+                                const mergeOptions = v.uniqueStationsList.filter(st => st.key !== log.key && !st.isMergedAway);
 
                                 return (
                                   <React.Fragment key={lIdx}>
                                     <div className="flow-connector-interactive">
                                       <div className="flow-connector-line" />
-                                      <div className="flow-connector-label">{Math.round(log.energyLegConsumed)} kWh</div>
+                                      <div className="flow-connector-label">{Math.round(deltaKm)} km</div>
                                     </div>
 
                                     <div className="flow-node-card-interactive">
@@ -2034,7 +2165,7 @@ export default function ComprehensiveTCOCalculator() {
                                             onChange={(e) => updateChargingStationOverride(v.id, log.key, "name", e.target.value)}
                                             style={{ width: "100%", fontSize: "11px", fontWeight: 600, padding: "4px 6px", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
                                           />
-                                          <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "4px" }}>
+                                          <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "4px", flexWrap: "wrap" }}>
                                             <span className={`badge ${log.isDepot ? "badge-info" : "badge-warn"}`} style={{ fontSize: "9px" }}>
                                               {log.isDepot ? "Depot Terminal" : "Highway"}
                                             </span>
@@ -2054,31 +2185,61 @@ export default function ComprehensiveTCOCalculator() {
                                         </div>
                                         <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed var(--border)", paddingTop: "4px" }}>
                                           <span style={{ color: "var(--text-dim)" }}>Station Capex:</span>
-                                          <span className="num" style={{ color: "var(--bev)" }}>{inr((matchedUnique.stationSetupCost || 0) + (matchedUnique.chargersCostSum || 0))}</span>
+                                          <span className="num" style={{ color: matchedUnique.isMergedAway ? "var(--text-dim)" : "var(--bev)" }}>
+                                            {matchedUnique.isMergedAway ? "₹0 (shared)" : inr((matchedUnique.stationSetupCost || 0) + (matchedUnique.chargersCostSum || 0))}
+                                          </span>
                                         </div>
                                       </div>
 
-                                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
-                                        <div style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>
-                                          Plugs (Auto: {matchedUnique.autoChargersSized}):
-                                        </div>
-                                        <div className="field-input" style={{ width: "70px" }}>
-                                          <input
-                                            type="number"
-                                            min="1"
-                                            step="1"
-                                            value={hasChargerOverride ? override.chargers : matchedUnique.autoChargersSized}
-                                            onChange={(e) => updateChargingStationOverride(v.id, log.key, "chargers", Math.max(1, Math.round(parseFloat(e.target.value) || 1)))}
-                                            style={{ width: "45px", padding: "4px" }}
-                                          />
-                                          <span className="field-suffix" style={{ paddingRight: 4 }}>#</span>
-                                        </div>
-                                        {(matchedUnique.isManualNameOverride || matchedUnique.isManualChargerOverride) && (
-                                          <button className="reset-btn" onClick={() => resetChargingStationOverride(v.id, log.key)} title="Reset to auto" style={{ padding: "4px 6px" }}>
-                                            <RotateCcw size={11} />
+                                      {matchedUnique.isMergedAway ? (
+                                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", background: "rgba(33,196,175,0.08)", border: "1px dashed var(--bev)", borderRadius: "6px", padding: "6px 8px" }}>
+                                          <span style={{ fontSize: "10.5px", color: "var(--bev)", display: "flex", alignItems: "center", gap: "4px" }}>
+                                            <Link2 size={11} /> Shares infra with "{matchedUnique.mergedIntoLabel}"
+                                          </span>
+                                          <button className="reset-btn" onClick={() => updateChargingStationOverride(v.id, log.key, "mergedInto", null)} title="Unlink" style={{ padding: "4px 6px" }}>
+                                            <Unlink size={11} />
                                           </button>
-                                        )}
-                                      </div>
+                                        </div>
+                                      ) : (
+                                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px" }}>
+                                          <div style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>
+                                            Plugs (Auto: {matchedUnique.autoChargersSized}):
+                                          </div>
+                                          <div className="field-input" style={{ width: "70px" }}>
+                                            <input
+                                              type="number"
+                                              min="0"
+                                              step="1"
+                                              value={hasChargerOverride ? override.chargers : matchedUnique.autoChargersSized}
+                                              onChange={(e) => updateChargingStationOverride(v.id, log.key, "chargers", Math.max(0, Math.round(parseFloat(e.target.value) || 0)))}
+                                              style={{ width: "45px", padding: "4px" }}
+                                            />
+                                            <span className="field-suffix" style={{ paddingRight: 4 }}>#</span>
+                                          </div>
+                                          {(matchedUnique.isManualNameOverride || matchedUnique.isManualChargerOverride) && (
+                                            <button className="reset-btn" onClick={() => resetChargingStationOverride(v.id, log.key)} title="Reset to auto" style={{ padding: "4px 6px" }}>
+                                              <RotateCcw size={11} />
+                                            </button>
+                                          )}
+                                        </div>
+                                      )}
+
+                                      {mergeOptions.length > 0 && (
+                                        <select
+                                          value={typeof override.mergedInto === "string" ? override.mergedInto : ""}
+                                          onChange={(e) => updateChargingStationOverride(v.id, log.key, "mergedInto", e.target.value || null)}
+                                          style={{ width: "100%", fontSize: "10.5px", padding: "5px 6px", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }}
+                                        >
+                                          <option value="">— Independent station —</option>
+                                          {mergeOptions.map(opt => (
+                                            <option key={opt.key} value={opt.key}>Merge into: {opt.label} ({opt.km} km)</option>
+                                          ))}
+                                        </select>
+                                      )}
+
+                                      {currentPlugs === 0 && !matchedUnique.isMergedAway && (
+                                        <div style={{ fontSize: "9.5px", color: "var(--text-dim)", textAlign: "center" }}>Zeroed out — no capex or opex counted here</div>
+                                      )}
                                       {isBelow && <div style={{ fontSize: "9.5px", color: "var(--bad)", textAlign: "center" }}>⚠️ Sized below queue demand</div>}
                                     </div>
                                   </React.Fragment>
@@ -2095,7 +2256,7 @@ export default function ComprehensiveTCOCalculator() {
                     <div className="kpi-card" style={{ background: "var(--panel)" }}>
                       <div className="kpi-label"><Activity size={15} style={{ marginRight: 6 }} /> Battery SOH Degradation Timeline (% SOH)</div>
                       <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginBottom: "8px" }}>
-                        Degradation step-down across project lifecycle with pack swap restorations.
+                        Non-linear fade: slow to the "knee", then accelerating toward end-of-life, with pack swap restorations.
                       </div>
                       <ResponsiveContainer width="100%" height={220}>
                         <LineChart data={results.multiEvSohData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
@@ -2105,7 +2266,7 @@ export default function ComprehensiveTCOCalculator() {
                           <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val}% SOH`} labelFormatter={(y) => `Year ${y}`} />
                           <Legend wrapperStyle={{ fontSize: 11 }} />
                           {results.evVehicles.map((v) => (
-                            <Line key={v.id} type="stepAfter" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
+                            <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
                           ))}
                         </LineChart>
                       </ResponsiveContainer>
@@ -2124,7 +2285,7 @@ export default function ComprehensiveTCOCalculator() {
                           <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val} km`} labelFormatter={(y) => `Year ${y}`} />
                           <Legend wrapperStyle={{ fontSize: 11 }} />
                           {results.evVehicles.map((v) => (
-                            <Line key={v.id} type="stepAfter" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
+                            <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
                           ))}
                         </LineChart>
                       </ResponsiveContainer>
@@ -2142,6 +2303,8 @@ export default function ComprehensiveTCOCalculator() {
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at Start (100% SOH):</span><strong className="num badge badge-info" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtStart)} km</strong></div>
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at SOH Limit:</span><strong className="num badge badge-warn" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtSOHLimit)} km</strong></div>
                             <hr style={{ border: 0, borderBottom: "1px solid var(--border)", margin: "4px 0" }} />
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Avg. Route Depth-of-Discharge:</span><strong className="num" style={{ fontSize: "12px" }}>{(v.avgDoDFraction * 100).toFixed(1)}%</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>DoD-Adjusted Cycle Life:</span><strong className="num" style={{ fontSize: "12px" }}>{Math.round(v.cyclesToEOL)} cycles</strong></div>
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Critical physical range SOH:</span><strong className="num" style={{ fontSize: "12px" }}>{v.criticalSOHLimit.toFixed(1)}% SOH</strong></div>
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Resolved SOH limit:</span><strong className="num" style={{ fontSize: "12px", fontWeight: "bold", color: "var(--bad)" }}>{v.resolvedSOHReplacementLimit.toFixed(1)}% SOH</strong></div>
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Analysis end SOH (Year {results.years}):</span><strong className="num" style={{ fontSize: "12px" }}>{v.currentSOH.toFixed(1)}%</strong></div>
