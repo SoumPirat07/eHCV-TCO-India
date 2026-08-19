@@ -222,7 +222,7 @@ const INITIAL_VEHICLES = [
     id: "v-bev-1", name: "Electric BEV 55T", type: "electric", purchasePrice: 9000000, gstRate: 5, registrationFee: 135000,
     trailerCost: 1800000, vehicleMiscCost: 0, tractorWeight: 9500, trailerWeight: 9000, gvwr: 55000,
     baseUnloadedEconomy: 0.6, baseLoadedEconomy: 0.31, batteryCapacity: 282, batteryReplacementCost: 4000000,
-    refCycleLifeAt100DoD: 1500, dodStressExponentK: 1.1, kneeSOH: 88, kneeCycleFraction: 0.7, postKneeExponent: 1.6,
+    refCycleLifeAt100DoD: 6000, dodStressExponentK: 1.3, kneeSOH: 88, kneeCycleFraction: 0.7, postKneeExponent: 1.6,
     batterySOHThreshold: 75, maintCostPerKm: 2.5, insuranceRatePct: 1.5,
     residualPct: 7, allowOverloading: false, overloadPenaltyPctPerTonne: 2.0, financing: "emi", downPaymentPct: 20,
     interestRate: 10.0, loanTenure: 7, driverSalaryMonthly: 45000, driversPerVehicle: 2, tollCostPerTrip: 7350,
@@ -563,12 +563,23 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   let sohTimeline = [];
   let rangeTimeline = [];
   let npvMarginTarget = 0;
+  let discountedCargoTonneKm = 0;
+  let discountedCargoTonnes = 0;
+
+  const cargoTonnesPerTrip = routeSegments.reduce(
+    (sum, seg, idx) => sum + Math.max(0, segmentCappedPayloads[idx]),
+    0
+  );
+  const annualCargoTonnesFleet = totalTripsAcrossFleetYear * cargoTonnesPerTrip;
 
   const baseTheoreticalRange = v.type === "electric" ? v.batteryCapacity * avgRouteEconomy : (v.type === "diesel" ? v.fuelCapacityLitres * avgRouteEconomy : 0);
   const baseOperationalRangeAtStart = v.type === "electric" ? v.batteryCapacity * ((100 - (v.safeSoCThreshold || 0)) / 100) * avgRouteEconomy : 0;
 
   for (let t = 1; t <= years; t++) {
     const df = dfRate > 0 ? 1 / Math.pow(1 + dfRate, t) : 1;
+    discountedCargoTonneKm += annualTonneKmFleet * df;
+    discountedCargoTonnes += annualCargoTonnesFleet * df;
+
     const multF = Math.pow(1 + escF, t - 1);
     const multE = Math.pow(1 + escE, t - 1);
     const multAMC = Math.pow(1 + escAMC, t - 1);
@@ -654,17 +665,41 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   cumCostTimeline[years] -= v.purchasePrice * (v.residualPct / 100) * fleetSizeRequired;
   breakdown.residuals = -npvResidualValue;
 
-  const totalCargoTonneKmFleet = annualTonneKmFleet * years;
-  const costPerTonneKm = totalCargoTonneKmFleet > 0 ? npvTCOSum / totalCargoTonneKmFleet : 0;
+  const totalCargoTonneKmFleet = discountedCargoTonneKm;
+  const totalCargoTonnesFleet = discountedCargoTonnes;
+
+  // Match NPV costs with discounted physical throughput.
+  const costPerTonneKm = totalCargoTonneKmFleet > 0
+    ? npvTCOSum / totalCargoTonneKmFleet : 0;
+  const costPerTonne = totalCargoTonnesFleet > 0
+    ? npvTCOSum / totalCargoTonnesFleet : 0;
+
   const requiredRevenueNPV = npvTCOSum + npvMarginTarget;
-  const requiredFreightRatePerTonneKm = totalCargoTonneKmFleet > 0 ? requiredRevenueNPV / totalCargoTonneKmFleet : 0;
+  const requiredFreightRatePerTonneKm = totalCargoTonneKmFleet > 0
+    ? requiredRevenueNPV / totalCargoTonneKmFleet : 0;
+  const requiredFreightRatePerTonne = totalCargoTonnesFleet > 0
+    ? requiredRevenueNPV / totalCargoTonnesFleet : 0;
 
-  const operationalRangeAtSOHLimit = v.type === "electric" ? baseOperationalRangeAtStart * (resolvedSOHReplacementLimit / 100) : 0;
+  const operationalRangeAtSOHLimit = v.type === "electric"
+    ? baseOperationalRangeAtStart * (resolvedSOHReplacementLimit / 100) : 0;
 
-  const loopCostPerTonneKm = costPerTonneKm;
+  // Total-loop costing: add the per-tonne cost of each loaded leg.
+  // This is intentionally a SUM, not an average/tonne-km-weighted average.
+  const loopCostPerTonneTrip = routeSegments.reduce((sum, seg, idx) => {
+    const payload = segmentCappedPayloads[idx];
+    return payload > 0 ? sum + (costPerTonneKm * seg.distance) : sum;
+  }, 0);
+
+  // For the complete loop, convert the summed ₹/tonne into ₹/tonne-km
+  // using the total loop distance.
+  const loopCostPerTonneKm = totalTripDistance > 0
+    ? loopCostPerTonneTrip / totalTripDistance : 0;
+
   const loopFreightRatePerTonneKm = requiredFreightRatePerTonneKm;
-
-  let totalFreightRatePerTonneTrip = 0;
+  const totalFreightRatePerTonneTrip = routeSegments.reduce((sum, seg, idx) => {
+    const payload = segmentCappedPayloads[idx];
+    return payload > 0 ? sum + (loopFreightRatePerTonneKm * seg.distance) : sum;
+  }, 0);
 
   const segmentCostPerTonneKm = routeSegments.map((seg, idx) => {
     const cappedPayload = segmentCappedPayloads[idx];
@@ -675,15 +710,11 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
       (v.tyresRear * v.tyreCostRear / Math.max(1, v.tyreLifeRear)) +
       (v.tyresTrailer * v.tyreCostTrailer / Math.max(1, v.tyreLifeTrailer));
     const operatingCostPerKm = fuelCostPerKm + v.maintCostPerKm + tyreCostPerKmFlat;
-    
+
     const costPerTonneKmSeg = cappedPayload > 0 ? loopCostPerTonneKm : null;
     const freightRatePerTonneKmSeg = cappedPayload > 0 ? loopFreightRatePerTonneKm : null;
     const costPerTonneSeg = cappedPayload > 0 ? loopCostPerTonneKm * seg.distance : null;
     const freightRatePerTonneSeg = cappedPayload > 0 ? loopFreightRatePerTonneKm * seg.distance : null;
-    
-    if (freightRatePerTonneSeg) {
-      totalFreightRatePerTonneTrip += freightRatePerTonneSeg;
-    }
 
     return {
       from: seg.from, to: seg.to, distance: seg.distance, payload: cappedPayload,
@@ -697,12 +728,15 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
     utilizationPctComputed, stopsLog, uniqueStationsList, turnaroundCycleHrs: fullTurnaroundCycleHrs,
     fleetSizeRequired, usesSegmentDemand, tripsPerYearPerVehicle, totalTripsAcrossFleetYear, totalDistanceAcrossFleetYear,
     tonneKmPerTrip, annualTonneKmFleet, totalChargersNeeded, uniqueStationsCount, npvTCOSum, cumCostTimeline, breakdown,
-    costPerTonneKm, requiredFreightRatePerTonneKm, segmentCostPerTonneKm, totalFreightRatePerTonneTrip, currentSOH,
+    costPerTonne, costPerTonneKm, requiredFreightRatePerTonne, requiredFreightRatePerTonneKm,
+    cargoTonnesPerTrip, totalCargoTonnesFleet, totalCargoTonneKmFleet,
+    loopCostPerTonneTrip, loopCostPerTonneKm, segmentCostPerTonneKm, totalFreightRatePerTonneTrip, currentSOH,
     criticalSOHLimit, resolvedSOHReplacementLimit, batterySetsReplacedCount, batteryReplacementLog, sohTimeline, rangeTimeline,
     segmentOverloads, maxTheoreticalRange: baseTheoreticalRange, operationalRangeAtStart: baseOperationalRangeAtStart, operationalRangeAtSOHLimit, replacementsPerVehicle: batteryReplacementLog.length,
     totalUpfrontGSTPrice, loanUpfrontDownpayment, loanPrincipalDebt, loanAnnualEMI, loanMonthlyEMI: loanAnnualEMI / 12,
     capitalSetupInfra, infraCapexPerTruck, loadedCapexPerTruckOnRoad, loadedCapexPerTruckEquity, totalFleetUpfrontCapex, totalFleetOnRoadCapex,
-    autoStationManpower, totalMonthlyStationManpower, avgDoDFraction, cyclesToEOL
+    autoStationManpower, totalMonthlyStationManpower, avgDoDFraction, cyclesToEOL,
+    annualCyclesPerVehicle
   };
 }
 
@@ -739,6 +773,41 @@ function computeBreakeven(chartData, nameA, nameB) {
   return null;
 }
 
+function buildMonthlyBatteryTimeline(v, years) {
+  const months = Math.max(1, Math.round(years * 12));
+  const annualCycles = Math.max(0, v.annualCyclesPerVehicle || 0);
+  const monthlyCycles = annualCycles / 12;
+  const cyclesToEOL = Math.max(1, v.cyclesToEOL || 1);
+  const baseRange = Math.max(0, v.operationalRangeAtStart || 0);
+  const kneeSOH = v.kneeSOH || 88;
+  const kneeCycleFraction = v.kneeCycleFraction || 0.7;
+  const eolSOH = v.resolvedSOHReplacementLimit || v.batterySOHThreshold || 75;
+  const postKneeExponent = v.postKneeExponent || 1.6;
+
+  let cyclesSinceReplacement = 0;
+  const timeline = [];
+
+  for (let month = 0; month <= months; month++) {
+    if (month > 0) {
+      cyclesSinceReplacement += monthlyCycles;
+      while (cyclesSinceReplacement >= cyclesToEOL) cyclesSinceReplacement -= cyclesToEOL;
+    }
+
+    const soh = sohAtCycleFraction(
+      cyclesSinceReplacement / cyclesToEOL,
+      kneeSOH, kneeCycleFraction, eolSOH, postKneeExponent
+    );
+
+    timeline.push({
+      month,
+      year: month / 12,
+      soh: Math.round(soh * 10) / 10,
+      range: Math.round(baseRange * (soh / 100))
+    });
+  }
+  return timeline;
+}
+
 export default function ComprehensiveTCOCalculator() {
   const [darkMode, setDarkMode] = useState(true);
   
@@ -753,7 +822,7 @@ export default function ComprehensiveTCOCalculator() {
 
   const [workingDaysPerMonth, setWorkingDaysPerMonth] = useState(25);
   const [loadingUnloadingTimePerTrip, setLoadingUnloadingTimePerTrip] = useState(10);
-  const [analysisPeriod, setAnalysisPeriod] = useState(10);
+  const [analysisPeriod, setAnalysisPeriod] = useState(8);
   
   // Discounting configuration
   const [enableDiscounting, setEnableDiscounting] = useState(false);
@@ -991,18 +1060,26 @@ export default function ComprehensiveTCOCalculator() {
     }));
 
     const evVehicles = computedVehicles.filter(v => v.type === "electric");
+    // Monthly graph resolution: follows cycle accumulation month-by-month
+    // and captures mid-year battery replacement/reset events.
     const multiEvSohData = [];
     const multiEvRangeData = [];
 
-    for (let t = 1; t <= years; t++) {
-      const sohRow = { year: t };
-      const rangeRow = { year: t };
-      evVehicles.forEach(v => {
-        const sohItem = v.sohTimeline.find(item => item.year === t);
-        const rangeItem = v.rangeTimeline.find(item => item.year === t);
-        sohRow[v.name] = sohItem ? sohItem.soh : 100;
-        rangeRow[v.name] = rangeItem ? rangeItem.range : Math.round(v.operationalRangeAtStart);
+    const monthlyBatteryTimelines = evVehicles.map(v => ({
+      vehicle: v,
+      timeline: buildMonthlyBatteryTimeline(v, years)
+    }));
+
+    for (let month = 0; month <= years * 12; month++) {
+      const sohRow = { month };
+      const rangeRow = { month };
+
+      monthlyBatteryTimelines.forEach(({ vehicle, timeline }) => {
+        const item = timeline[month];
+        sohRow[vehicle.name] = item ? item.soh : 100;
+        rangeRow[vehicle.name] = item ? item.range : Math.round(vehicle.operationalRangeAtStart);
       });
+
       multiEvSohData.push(sohRow);
       multiEvRangeData.push(rangeRow);
     }
@@ -1775,9 +1852,9 @@ export default function ComprehensiveTCOCalculator() {
                   <div key={v.id} className="kpi-card" style={{ borderTop: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
                     <div className="kpi-label">{v.name} ({v.fleetSizeRequired} Units)</div>
                     <div className="kpi-val num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>{inrCompact(v.npvTCOSum)}</div>
-                    <div style={{ display: "flex", justifyContent: "space-between", borderBottom: "1px solid var(--border)", paddingBottom: "6px", marginBottom: "8px" }}>
-                      <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Est. Rate per Trip</span>
-                      <span className="num" style={{ fontWeight: 700, fontSize: "12.5px" }}>₹{Math.round(v.totalFreightRatePerTonneTrip)}/Ton</span>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border)", paddingBottom: "8px", marginBottom: "10px" }}>
+                      <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Total Cost / Ton</span>
+                      <span className="num" style={{ fontWeight: 700, fontSize: "13px" }}>₹{Math.round(v.loopCostPerTonneTrip)}/Ton</span>
                     </div>
                     <div className="kpi-sub">
                       Turnaround: <strong className="num">{v.turnaroundCycleHrs.toFixed(2)} Hrs</strong><br />
@@ -2261,9 +2338,9 @@ export default function ComprehensiveTCOCalculator() {
                       <ResponsiveContainer width="100%" height={220}>
                         <LineChart data={results.multiEvSohData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
                           <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                          <XAxis dataKey="year" tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" />
+                          <XAxis dataKey="month" interval={11} tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" tickFormatter={(m) => `Y${Math.floor(Number(m) / 12)}`} />
                           <YAxis domain={[50, 100]} tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" width={35} />
-                          <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val}% SOH`} labelFormatter={(y) => `Year ${y}`} />
+                          <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val}% SOH`} labelFormatter={(m) => `Month ${m} (Year ${(Number(m) / 12).toFixed(1)})`} />
                           <Legend wrapperStyle={{ fontSize: 11 }} />
                           {results.evVehicles.map((v) => (
                             <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
@@ -2280,9 +2357,9 @@ export default function ComprehensiveTCOCalculator() {
                       <ResponsiveContainer width="100%" height={220}>
                         <LineChart data={results.multiEvRangeData} margin={{ top: 10, right: 20, left: -10, bottom: 0 }}>
                           <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                          <XAxis dataKey="year" tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" />
+                          <XAxis dataKey="month" interval={11} tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" tickFormatter={(m) => `Y${Math.floor(Number(m) / 12)}`} />
                           <YAxis tick={{ fontSize: 10, fill: "var(--text-dim)" }} stroke="var(--border)" width={45} tickFormatter={(val) => `${val} km`} />
-                          <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val} km`} labelFormatter={(y) => `Year ${y}`} />
+                          <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)", fontSize: "11px" }} formatter={(val) => `${val} km`} labelFormatter={(m) => `Month ${m} (Year ${(Number(m) / 12).toFixed(1)})`} />
                           <Legend wrapperStyle={{ fontSize: 11 }} />
                           {results.evVehicles.map((v) => (
                             <Line key={v.id} type="monotone" dataKey={v.name} stroke={colorForVehicle(v, results.computedVehicles)} strokeWidth={2.2} dot={{ r: 2 }} />
