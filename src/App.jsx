@@ -2011,7 +2011,6 @@ export default function ComprehensiveTCOCalculator() {
             Commercial Fleet Logistics & Duty Cycle TCO Simulator
           </div>
           <div style={{ fontSize: "12px", color: "var(--text-dim)", marginTop: "4px" }}>
-            High-precision DCF Lifecycle Costing & EV Infrastructure Digital Twin Engine
           </div>
         </div>
         <div style={{ display: "flex", gap: "10px" }}>
