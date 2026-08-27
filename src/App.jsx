@@ -1,8 +1,8 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import {
   Truck, Zap, Fuel, BatteryCharging, TrendingUp,
   RotateCcw, PlugZap, Plus, Trash2, MapPin, Settings, Sun, Moon, AlertTriangle, CheckCircle2,
-  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon, Target, Activity, Battery, Users, ToggleLeft, ToggleRight, Link2, Unlink, Info, Maximize2, Minimize2, ZoomIn, ZoomOut, Move
+  Sparkles, GitBranch, Route, DollarSign, Clock, BarChart3, PieChart as PieChartIcon, Target, Activity, Battery, Users, ToggleLeft, ToggleRight, Link2, Unlink, Info, Maximize2, Minimize2, ZoomIn, ZoomOut, Move, ArrowRight, CornerDownRight, Check
 } from "lucide-react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -73,16 +73,16 @@ const TRAFFIC_CONDITIONS = ["High", "Medium", "Low"];
 const PAYLOAD_KEYS = [0, 20, 40, 60];
 
 const PIE_COLOR_MAP = {
-  "Capital & Infra": "#38bdf8",
-  "Fuel/Energy": "#10b981",
+  "Capital & Infra": "#00f2fe",
+  "Fuel/Energy": "#00e5a3",
   "EMI/Debt": "#f59e0b",
-  "Maintenance & Ins": "#ef4444",
-  "Wages & Drivers": "#8b5cf6",
+  "Maintenance & Ins": "#f43f5e",
+  "Wages & Drivers": "#a855f7",
   "Tolls & Tyres": "#ec4899",
   "Battery Replacements": "#64748b",
-  "Depot Upkeep": "#14b8a6",
-  "Misc Overheads": "#f97316",
-  "Operator Margin": "#a855f7"
+  "Depot Upkeep": "#06b6d4",
+  "Misc Overheads": "#fb923c",
+  "Operator Margin": "#38bdf8"
 };
 
 function interpolateEfficiency(roadType, traffic, payload, vehicleType, dieselMatrix, evMatrix) {
@@ -133,9 +133,6 @@ function getPayloadCap(v) {
   return Math.max(0, v.gvwr - v.tractorWeight - v.trailerWeight) / 1000;
 }
 
-// -----------------------------------------------------------------------
-// NON-LINEAR BATTERY DEGRADATION MODEL
-// -----------------------------------------------------------------------
 function sohAtCycleFraction(fractionOfLife, kneeSOH, kneeCycleFraction, eolSOH, postKneeExponent) {
   const f = Math.min(1, Math.max(0, fractionOfLife));
   const kf = Math.min(0.98, Math.max(0.02, kneeCycleFraction));
@@ -173,8 +170,8 @@ const DEFAULT_ROUTE = [
   { id: "3", from: "C", to: "A", distance: 550, avgSpeed: 35, stretches: generateDefaultStretches(), hasDepotAtTo: true, payloadByVehicle: { "v-diesel-1": 38, "v-bev-1": 36.5 } }
 ];
 
-const EV_SHADES = ["#21bfa9", "#38bdf8", "#10b981", "#5eead4"];
-const DIESEL_SHADES = ["#e29532", "#f59e0b", "#ec4899", "#fb923c"];
+const EV_SHADES = ["#00e5a3", "#00f2fe", "#38bdf8", "#818cf8"];
+const DIESEL_SHADES = ["#f59e0b", "#fb923c", "#f43f5e", "#eab308"];
 
 function colorForVehicle(v, allVehicles) {
   const sameTypeIdx = Math.max(0, allVehicles.filter((x) => x.type === v.type).findIndex((x) => x.id === v.id));
@@ -193,287 +190,424 @@ function buildFlowSequence(v, routeSegments) {
   
   const chargeKms = new Set((v.stopsLog || []).map((l) => l.km));
   const passThroughs = waypoints
-    .filter((w) => !chargeKms.has(w.km) && w.km !== 0) // Keep start separate
+    .filter((w) => !chargeKms.has(w.km) && w.km !== 0)
     .map((w) => ({ type: "waypoint", km: w.km, name: w.name }));
     
   const chargeNodes = (v.stopsLog || []).map((l) => ({ type: "charge", km: l.km, log: l }));
-  
   const startNode = { type: "start", km: 0, name: waypoints[0].name };
   
   return [startNode, ...passThroughs, ...chargeNodes].sort((a, b) => a.km - b.km);
 }
 
 // ---------------------------------------------------------------------------
-// INTERACTIVE CANVAS COMPONENT
+// CIRCULAR SOC PROGRESS COMPONENT
+// ---------------------------------------------------------------------------
+const CircularSoc = ({ soc, size = 44, stroke = 3.5, color = "var(--bev)" }) => {
+  const r = (size - stroke * 2) / 2;
+  const c = 2 * Math.PI * r;
+  const offset = c - (Math.min(100, Math.max(0, parseFloat(soc) || 0)) / 100) * c;
+  return (
+    <div style={{ position: "relative", width: size, height: size, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+      <svg width={size} height={size} style={{ transform: "rotate(-90deg)", position: "absolute", top: 0, left: 0 }}>
+        <circle cx={size/2} cy={size/2} r={r} stroke="rgba(255,255,255,0.08)" strokeWidth={stroke} fill="transparent" />
+        <circle
+          cx={size/2} cy={size/2} r={r}
+          stroke={color} strokeWidth={stroke}
+          strokeDasharray={c} strokeDashoffset={offset}
+          strokeLinecap="round" fill="transparent"
+          style={{ transition: "stroke-dashoffset 0.4s ease" }}
+        />
+      </svg>
+      <span className="num" style={{ fontSize: "10.5px", fontWeight: 700, color: "var(--text)" }}>{soc}%</span>
+    </div>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// ENHANCED INTERACTIVE CANVAS & AUTO-WRAP PIPELINE
 // ---------------------------------------------------------------------------
 const FlowCanvas = ({ v, flowSequence, chargingStationOverrides, updateChargingStationOverride, resetChargingStationOverride }) => {
   const memoryStorageKey = `truck-tco-flow-memory-${v.id}`;
   const modeStorageKey = `truck-tco-flow-mode-${v.id}`;
+  
   const readFlowMemory = () => {
     try {
       const raw = localStorage.getItem(memoryStorageKey);
       return raw ? JSON.parse(raw) : {};
     } catch (_) { return {}; }
   };
+
   const [positions, setPositions] = useState(() => readFlowMemory().positions || {});
   const [flowchartMode, setFlowchartMode] = useState(() => {
     try { return localStorage.getItem(modeStorageKey) || "interactive"; } catch (_) { return "interactive"; }
   });
+
+  // Canvas Pan & Zoom State
+  const [pan, setPan] = useState({ x: 40, y: 40 });
+  const [zoom, setZoom] = useState(1);
+  const [isPanning, setIsPanning] = useState(false);
+  const [panStart, setPanStart] = useState({ x: 0, y: 0 });
+
+  // Node Dragging State
   const [draggingKey, setDraggingKey] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-  const [mergeTarget, setMergeTarget] = useState(null);
-  const [zoom, setZoom] = useState(1);
+  const [hoveredMergeTarget, setHoveredMergeTarget] = useState(null);
+
   const [isFullscreen, setIsFullscreen] = useState(false);
   const viewportRef = useRef(null);
 
-  // Keep a persistent layout memory for this vehicle.
-  // Positions are keyed by logical route location rather than the generated stop label,
-  // so optimiser runs do not throw away a layout that the user already arranged.
-  const getMemoryKey = (node) => {
-    if (node.type === "start") return "start";
-    if (node.type === "waypoint") return `waypoint-${node.km}-${node.name}`;
-    return `charge-${node.km}`;
-  };
+  // Group nodes: master station entities hold all merged stops cleanly
+  const { masterNodes, visualEdges } = useMemo(() => {
+    const rawMasterMap = {};
+    const nodes = [];
+    const keyToStationRoot = {};
 
+    // Determine root station keys for all charge stops
+    flowSequence.forEach(node => {
+      if (node.type === "charge") {
+        const ov = chargingStationOverrides[v.id]?.[node.log.key] || {};
+        const isMerged = typeof ov.mergedInto === "string" && ov.mergedInto !== node.log.key;
+        keyToStationRoot[node.log.key] = isMerged ? ov.mergedInto : node.log.key;
+      }
+    });
+
+    flowSequence.forEach((node, idx) => {
+      if (node.type === "start") {
+        nodes.push({ id: "start-0", type: "start", km: 0, name: node.name, rawNode: node });
+      } else if (node.type === "waypoint") {
+        nodes.push({ id: `wp-${node.km}-${node.name}`, type: "waypoint", km: node.km, name: node.name, rawNode: node });
+      } else if (node.type === "charge") {
+        const rootKey = keyToStationRoot[node.log.key] || node.log.key;
+        const matchedUnique = v.uniqueStationsList?.find(st => st.key === node.log.key) || {};
+        const isMergedAway = matchedUnique.isMergedAway;
+
+        if (!isMergedAway) {
+          // This is a master station node
+          const override = chargingStationOverrides[v.id]?.[rootKey] || {};
+          const stationInfo = v.uniqueStationsList?.find(st => st.key === rootKey) || {};
+          
+          // Gather all stops that are merged into this master station
+          const mergedChildren = flowSequence
+            .filter(n => n.type === "charge" && (keyToStationRoot[n.log.key] === rootKey) && (n.log.key !== rootKey))
+            .map(n => ({
+              log: n.log,
+              km: n.km,
+              unique: v.uniqueStationsList?.find(st => st.key === n.log.key) || {}
+            }));
+
+          const masterItem = {
+            id: rootKey,
+            type: "station",
+            km: node.km,
+            log: node.log,
+            nameOverride: override.name,
+            chargerOverride: override.chargers,
+            stationInfo,
+            mergedChildren,
+            rawNode: node
+          };
+          rawMasterMap[rootKey] = masterItem;
+          nodes.push(masterItem);
+        }
+      }
+    });
+
+    // Build edges following logical sequence across master visual nodes
+    const edges = [];
+    let prevVisualId = null;
+    let prevKm = 0;
+
+    flowSequence.forEach(node => {
+      let visualId = null;
+      if (node.type === "start") visualId = "start-0";
+      else if (node.type === "waypoint") visualId = `wp-${node.km}-${node.name}`;
+      else if (node.type === "charge") visualId = keyToStationRoot[node.log.key] || node.log.key;
+
+      if (prevVisualId && visualId && prevVisualId !== visualId) {
+        edges.push({
+          id: `edge-${prevVisualId}-${visualId}-${node.km}`,
+          fromId: prevVisualId,
+          toId: visualId,
+          distance: Math.max(0, Math.round(node.km - prevKm))
+        });
+      }
+      prevVisualId = visualId;
+      prevKm = node.km;
+    });
+
+    return { masterNodes: nodes, visualEdges: edges };
+  }, [flowSequence, chargingStationOverrides, v]);
+
+  // Initial layout calculation / memory recall
   useEffect(() => {
     setPositions(prev => {
       const memory = readFlowMemory();
       const remembered = memory.positions || {};
       const next = { ...remembered, ...prev };
-      let changed = Object.keys(next).length !== Object.keys(prev).length;
+      let changed = false;
 
-      flowSequence.forEach((node, i) => {
-        const key = node.type === 'start' ? 'start-0' : (node.type === 'waypoint' ? `wp-${node.km}-${node.name}` : node.log.key);
-        const memoryKey = getMemoryKey(node);
-        let initX = 50 + (i * 320);
-        let initY = 80 + ((i % 2) * 120);
-
-        if (node.type === 'charge') {
-          const override = chargingStationOverrides[v.id]?.[key] || {};
-          const isMerged = typeof override.mergedInto === 'string';
-          const targetMemoryKey = isMerged ? `charge-${(flowSequence.find(n => n.type === 'charge' && n.log.key === override.mergedInto) || {}).km}` : null;
-          const rememberedTarget = targetMemoryKey ? next[targetMemoryKey] : null;
-          if (rememberedTarget) {
-            initX = rememberedTarget.x + 30;
-            initY = rememberedTarget.y + 30;
-          }
-        }
-
-        if (!next[key]) {
-          next[key] = remembered[memoryKey] || { x: initX, y: initY };
+      masterNodes.forEach((node, i) => {
+        if (!next[node.id]) {
+          const defaultX = 60 + (i * 320);
+          const defaultY = 100 + ((i % 2) * 110);
+          next[node.id] = { x: defaultX, y: defaultY };
           changed = true;
         }
       });
 
-      if (changed || JSON.stringify(next) !== JSON.stringify(prev)) {
-        try { localStorage.setItem(memoryStorageKey, JSON.stringify({ positions: next, updatedAt: Date.now() })); } catch (_) {}
+      if (changed) {
+        try { localStorage.setItem(memoryStorageKey, JSON.stringify({ positions: next })); } catch (_) {}
         return next;
       }
       return prev;
     });
-  }, [flowSequence, chargingStationOverrides, v.id]);
+  }, [masterNodes, memoryStorageKey]);
 
-  useEffect(() => {
-    try { localStorage.setItem(memoryStorageKey, JSON.stringify({ positions, updatedAt: Date.now() })); } catch (_) {}
-  }, [positions, memoryStorageKey]);
+  const savePositions = useCallback((newPos) => {
+    setPositions(newPos);
+    try { localStorage.setItem(memoryStorageKey, JSON.stringify({ positions: newPos })); } catch (_) {}
+  }, [memoryStorageKey]);
 
-  useEffect(() => {
-    try { localStorage.setItem(modeStorageKey, flowchartMode); } catch (_) {}
-  }, [flowchartMode, modeStorageKey]);
+  const autoAlignNodes = () => {
+    const next = {};
+    masterNodes.forEach((node, i) => {
+      const row = Math.floor(i / 4);
+      const col = i % 4;
+      next[node.id] = {
+        x: 60 + (col * 340),
+        y: 80 + (row * 240)
+      };
+    });
+    savePositions(next);
+    setPan({ x: 40, y: 40 });
+    setZoom(1);
+  };
 
-  useEffect(() => {
-    const onFullscreenChange = () => setIsFullscreen(document.fullscreenElement === viewportRef.current);
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', onFullscreenChange);
-  }, []);
-
-  const setZoomClamped = (value) => setZoom(Math.min(2, Math.max(0.5, value)));
+  const setZoomClamped = (val) => setZoom(Math.min(2.0, Math.max(0.45, Math.round(val * 100) / 100)));
 
   const toggleFullscreen = async () => {
     try {
       if (document.fullscreenElement === viewportRef.current) await document.exitFullscreen();
       else await viewportRef.current?.requestFullscreen();
-    } catch (err) {
-      // Fullscreen can be denied by browser policy; the canvas remains usable in normal mode.
+    } catch (_) {}
+  };
+
+  // Background Panning Handlers
+  const handleCanvasMouseDown = (e) => {
+    if (e.button !== 0) return; // Left click only
+    setIsPanning(true);
+    setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+  };
+
+  const handleCanvasMouseMove = (e) => {
+    if (isPanning) {
+      setPan({
+        x: e.clientX - panStart.x,
+        y: e.clientY - panStart.y
+      });
+      return;
     }
-  };
 
-  const getCanvasPoint = (e) => {
-    const rect = viewportRef.current.getBoundingClientRect();
-    return {
-      x: (e.clientX - rect.left) / zoom,
-      y: (e.clientY - rect.top) / zoom,
-    };
-  };
+    if (draggingKey) {
+      const pos = positions[draggingKey] || { x: 0, y: 0 };
+      const newX = (e.clientX - pan.x) / zoom - dragOffset.x;
+      const newY = (e.clientY - pan.y) / zoom - dragOffset.y;
 
-  const handlePointerDown = (e, key) => {
-    e.stopPropagation();
-    const point = getCanvasPoint(e);
-    e.currentTarget.setPointerCapture(e.pointerId);
-    setDraggingKey(key);
-    setDragOffset({ x: point.x - positions[key].x, y: point.y - positions[key].y });
-  };
+      const updated = { ...positions, [draggingKey]: { x: newX, y: newY } };
+      setPositions(updated);
 
-  const handlePointerMove = (e, nodeType, key) => {
-    if (draggingKey !== key) return;
-    const point = getCanvasPoint(e);
-    const newX = point.x - dragOffset.x;
-    const newY = point.y - dragOffset.y;
-
-    setPositions(prev => ({ ...prev, [draggingKey]: { x: newX, y: newY } }));
-
-    if (nodeType === 'charge') {
-      let closest = null;
-      let minDist = 150;
-      flowSequence.forEach(n => {
-        if (n.type === 'charge' && n.log.key !== draggingKey) {
-          const targetKey = n.log.key;
-          const isTargetMerged = typeof chargingStationOverrides[v.id]?.[targetKey]?.mergedInto === 'string';
-          if (!isTargetMerged && positions[targetKey]) {
-            const dx = positions[targetKey].x - newX;
-            const dy = positions[targetKey].y - newY;
+      // Check proximity to other master station nodes for seamless merge drop
+      const draggingNode = masterNodes.find(n => n.id === draggingKey);
+      if (draggingNode && draggingNode.type === "station") {
+        let closest = null;
+        let minDist = 160;
+        masterNodes.forEach(n => {
+          if (n.type === "station" && n.id !== draggingKey && positions[n.id]) {
+            const dx = positions[n.id].x - newX;
+            const dy = positions[n.id].y - newY;
             const dist = Math.sqrt(dx * dx + dy * dy);
             if (dist < minDist) {
               minDist = dist;
-              closest = targetKey;
+              closest = n.id;
             }
           }
-        }
-      });
-      setMergeTarget(closest);
+        });
+        setHoveredMergeTarget(closest);
+      }
     }
   };
 
-  const handlePointerUp = (e, nodeType) => {
-    try { e.currentTarget.releasePointerCapture(e.pointerId); } catch (_) {}
-    if (draggingKey && mergeTarget && nodeType === 'charge') {
-      updateChargingStationOverride(v.id, draggingKey, "mergedInto", mergeTarget);
-      setPositions(prev => ({
-        ...prev,
-        [draggingKey]: { x: prev[mergeTarget].x + 20, y: prev[mergeTarget].y + 20 }
-      }));
+  const handleCanvasMouseUp = () => {
+    if (isPanning) setIsPanning(false);
+    if (draggingKey) {
+      if (hoveredMergeTarget) {
+        updateChargingStationOverride(v.id, draggingKey, "mergedInto", hoveredMergeTarget);
+      }
+      savePositions(positions);
+      setDraggingKey(null);
+      setHoveredMergeTarget(null);
     }
-    setDraggingKey(null);
-    setMergeTarget(null);
   };
 
-  const getWidthForType = (type) => type === 'charge' ? 260 : 160;
-  const maxX = Math.max(1800, ...Object.values(positions).map(p => p.x + 340));
-  const maxY = Math.max(1200, ...Object.values(positions).map(p => p.y + 220));
+  const handleWheel = (e) => {
+    e.preventDefault();
+    const zoomDelta = e.deltaY < 0 ? 0.08 : -0.08;
+    setZoomClamped(zoom + zoomDelta);
+  };
+
+  const startDraggingNode = (e, nodeId) => {
+    e.stopPropagation();
+    const pos = positions[nodeId] || { x: 0, y: 0 };
+    setDraggingKey(nodeId);
+    setDragOffset({
+      x: (e.clientX - pan.x) / zoom - pos.x,
+      y: (e.clientY - pan.y) / zoom - pos.y
+    });
+  };
+
+  const getNodeWidth = (node) => (node.type === "station" ? 300 : 180);
 
   return (
     <div ref={viewportRef} className="flow-canvas-viewport">
+      {/* High-Tech Top Control Bar */}
       <div className="flow-canvas-toolbar">
         <div className="flow-canvas-help">
-          <Info size={15} color="var(--bev)" />
-          <span><strong>Interactive route canvas:</strong> drag nodes to arrange the route. Drag a charger onto another charger to merge infrastructure.</span>
+          <div className="status-dot-pulse" />
+          <span><strong>EV Charging & Route Topology</strong> · Drag nodes to layout · Drag a charger onto another charger to merge infrastructure</span>
         </div>
         <div className="flow-canvas-controls">
           <div className="flow-mode-toggle">
-            <button className={flowchartMode === "interactive" ? "active" : ""} onClick={() => setFlowchartMode("interactive")}><Move size={12} /> Interactive</button>
-            <button className={flowchartMode === "standard" ? "active" : ""} onClick={() => setFlowchartMode("standard")}><Route size={12} /> Standard</button>
+            <button className={flowchartMode === "interactive" ? "active" : ""} onClick={() => setFlowchartMode("interactive")}><Move size={12} /> Canvas View</button>
+            <button className={flowchartMode === "standard" ? "active" : ""} onClick={() => setFlowchartMode("standard")}><Route size={12} /> Pipeline Flow</button>
           </div>
-          <button className="mini-btn-outline" onClick={() => setZoomClamped(zoom - 0.1)} title="Zoom out"><ZoomOut size={14} /></button>
-          <span className="flow-zoom-label">{Math.round(zoom * 100)}%</span>
-          <button className="mini-btn-outline" onClick={() => setZoomClamped(zoom + 0.1)} title="Zoom in"><ZoomIn size={14} /></button>
-          <button className="mini-btn-outline" onClick={() => setZoomClamped(1)} title="Reset zoom">100%</button>
-          <button className="mini-btn-outline" onClick={toggleFullscreen} title={isFullscreen ? "Exit full screen" : "Full screen"}>
-            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          {flowchartMode === "interactive" && (
+            <>
+              <button className="mini-btn-outline" onClick={() => setZoomClamped(zoom - 0.1)} title="Zoom Out"><ZoomOut size={13} /></button>
+              <span className="flow-zoom-label">{Math.round(zoom * 100)}%</span>
+              <button className="mini-btn-outline" onClick={() => setZoomClamped(zoom + 0.1)} title="Zoom In"><ZoomIn size={13} /></button>
+              <button className="mini-btn-outline" onClick={autoAlignNodes} title="Auto Align Grid"><Sparkles size={13} /> Align</button>
+            </>
+          )}
+          <button className="mini-btn-outline" onClick={toggleFullscreen} title={isFullscreen ? "Exit Fullscreen" : "Fullscreen"}>
+            {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
-          <button className="mini-btn-outline" onClick={() => {
-            try { localStorage.removeItem(memoryStorageKey); } catch (_) {}
-            setPositions({});
-          }} title="Forget saved layout and rebuild the standard layout"><RotateCcw size={14} /></button>
         </div>
       </div>
 
+      {/* MODE 1: AUTO-WRAPPING PIPELINE FLOW (Clean Left-To-Right with wrapping) */}
       {flowchartMode === "standard" ? (
-        <div className="flow-canvas-scroll-area standard-flow-scroll">
-          <div className="standard-flow-container" style={{ transform: `scale(${zoom})`, transformOrigin: 'top left' }}>
-            {flowSequence.map((node, i) => {
-              const isStart = node.type === "start";
-              const isWaypoint = node.type === "waypoint";
-              const isCharge = node.type === "charge";
-              const matchedUnique = isCharge ? (v.uniqueStationsList.find(st => st.key === node.log.key) || {}) : {};
-              const override = isCharge ? (chargingStationOverrides[v.id]?.[node.log.key] || {}) : {};
-              const previous = flowSequence[i - 1];
-              const otherStations = isCharge
-                ? flowSequence
-                    .filter(n => n.type === "charge" && n.log.key !== node.log.key)
-                    .map(n => v.uniqueStationsList.find(st => st.key === n.log.key) || {})
-                    .filter(st => st.key && !st.isMergedAway)
-                : [];
+        <div className="standard-pipeline-viewport">
+          <div className="standard-pipeline-wrap">
+            {masterNodes.map((node, i) => {
+              const prevEdge = visualEdges.find(e => e.toId === node.id);
               return (
-                <React.Fragment key={`standard-${node.type}-${node.km}-${node.name || node.log?.key}`}>
+                <React.Fragment key={`pipeline-${node.id}`}>
                   {i > 0 && (
-                    <div className="standard-flow-connector">
-                      <span>{Math.round(node.km - previous.km)} km</span>
+                    <div className="pipeline-connector-pill">
+                      <div className="pipeline-line" />
+                      <span className="pipeline-distance-chip">
+                        <ArrowRight size={10} style={{ display: "inline", verticalAlign: "-1px", marginRight: 3 }} />
+                        {prevEdge ? prevEdge.distance : (node.km - (masterNodes[i-1]?.km || 0))} km
+                      </span>
                     </div>
                   )}
-                  <div className={`standard-flow-node ${isCharge ? "charge" : isStart ? "start" : "waypoint"}`}>
-                    <div className="standard-flow-badge">{isStart ? "START" : isCharge ? (node.log.isDepot ? "DEPOT" : "CHARGER") : "WAYPOINT"}</div>
 
-                    {isCharge ? (
-                      <>
-                        <div style={{ display: "flex", gap: "8px", alignItems: "flex-start" }}>
-                          <div className="flow-dial" style={{ flexShrink: 0 }}>{node.log.socBefore}%</div>
+                  <div className={`pipeline-card ${node.type === 'station' ? 'station' : node.type === 'start' ? 'start' : 'waypoint'}`}>
+                    {node.type === "start" && (
+                      <div className="pipeline-card-inner">
+                        <div className="pipeline-header">
+                          <span className="cyber-badge badge-good">START NODE</span>
+                          <span className="num" style={{ fontSize: "11px", color: "var(--text-dim)" }}>0 km</span>
+                        </div>
+                        <div className="pipeline-title">{node.name}</div>
+                        <div className="pipeline-footer-stat">Depart with 100% SoC</div>
+                      </div>
+                    )}
+
+                    {node.type === "waypoint" && (
+                      <div className="pipeline-card-inner">
+                        <div className="pipeline-header">
+                          <span className="cyber-badge badge-muted">LOAD / UNLOAD</span>
+                          <span className="num" style={{ fontSize: "11px", color: "var(--text-dim)" }}>{node.km} km</span>
+                        </div>
+                        <div className="pipeline-title">{node.name}</div>
+                        <div className="pipeline-footer-stat">Turnaround Stop</div>
+                      </div>
+                    )}
+
+                    {node.type === "station" && (
+                      <div className="pipeline-card-inner">
+                        <div className="pipeline-header">
+                          <span className={`cyber-badge ${node.log.isDepot ? "badge-info" : "badge-warn"}`}>
+                            {node.log.isDepot ? "TERMINAL DEPOT" : "FAST CHARGER"}
+                          </span>
+                          <span className="num" style={{ fontSize: "11px", color: "var(--text-dim)" }}>{node.km} km</span>
+                        </div>
+
+                        <div style={{ display: "flex", gap: "10px", alignItems: "center", margin: "8px 0" }}>
+                          <CircularSoc soc={node.log.socBefore} color={node.log.isDepot ? "var(--bev)" : "var(--diesel)"} />
                           <div style={{ flex: 1, minWidth: 0 }}>
                             <input
                               type="text"
-                              value={typeof override.name === "string" ? override.name : ""}
-                              placeholder={matchedUnique.originalLabel || node.log.label}
-                              onChange={(e) => updateChargingStationOverride(v.id, node.log.key, "name", e.target.value)}
-                              onPointerDown={(e) => e.stopPropagation()}
-                              style={{ width: "100%", fontSize: "12px", fontWeight: 700, padding: "5px 7px", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: "5px", color: "var(--text)" }}
+                              className="cyber-input"
+                              value={typeof node.nameOverride === "string" ? node.nameOverride : ""}
+                              placeholder={node.stationInfo.originalLabel || node.log.label}
+                              onChange={(e) => updateChargingStationOverride(v.id, node.id, "name", e.target.value)}
                             />
-                            <div className="standard-flow-meta">{node.km} km · {node.log.socBefore}% → {node.log.socAfter}%</div>
+                            <div className="num" style={{ fontSize: "11px", color: "var(--bev)", marginTop: "4px" }}>
+                              {node.log.socBefore}% → 100% SoC
+                            </div>
                           </div>
                         </div>
 
-                        {!matchedUnique.isMergedAway && (
-                          <div style={{ marginTop: "10px", display: "grid", gridTemplateColumns: "1fr auto", gap: "7px", alignItems: "center" }}>
-                            <span style={{ fontSize: "10px", color: "var(--text-dim)" }}>Plugs (Auto: {matchedUnique.autoChargersSized ?? 0})</span>
+                        {/* Plugs configuration */}
+                        <div className="station-meta-row">
+                          <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Dispensers:</span>
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
                             <input
                               type="number" min="0" step="1"
-                              value={Number.isFinite(override.chargers) ? override.chargers : (matchedUnique.autoChargersSized ?? 0)}
-                              onPointerDown={(e) => e.stopPropagation()}
-                              onChange={(e) => updateChargingStationOverride(v.id, node.log.key, "chargers", Math.max(0, Math.round(parseFloat(e.target.value) || 0)))}
-                              style={{ width: "62px", padding: "5px 6px", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: "5px", color: "var(--text)" }}
+                              className="cyber-input-mini"
+                              value={Number.isFinite(node.chargerOverride) ? node.chargerOverride : (node.stationInfo.autoChargersSized ?? 1)}
+                              onChange={(e) => updateChargingStationOverride(v.id, node.id, "chargers", Math.max(0, Math.round(parseFloat(e.target.value) || 0)))}
                             />
+                            <span style={{ fontSize: "10px", color: "var(--text-dim)" }}>(Auto: {node.stationInfo.autoChargersSized ?? 1})</span>
                           </div>
-                        )}
+                        </div>
 
-                        {matchedUnique.isMergedAway ? (
-                          <div style={{ marginTop: "9px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "7px", background: "rgba(33,196,175,0.08)", border: "1px dashed var(--bev)", borderRadius: "6px", padding: "6px 8px" }}>
-                            <span style={{ fontSize: "10px", color: "var(--bev)" }}>Shares infra with "{matchedUnique.mergedIntoLabel}"</span>
-                            <button className="reset-btn" onPointerDown={e => e.stopPropagation()} onClick={() => updateChargingStationOverride(v.id, node.log.key, "mergedInto", null)} title="Unmerge">Unmerge</button>
-                          </div>
-                        ) : (
-                          <div style={{ marginTop: "9px", display: "grid", gridTemplateColumns: "1fr auto", gap: "7px", alignItems: "center" }}>
-                            <select
-                              value=""
-                              onPointerDown={(e) => e.stopPropagation()}
-                              onChange={(e) => {
-                                if (e.target.value) updateChargingStationOverride(v.id, node.log.key, "mergedInto", e.target.value);
-                              }}
-                              style={{ width: "100%", minWidth: 0, padding: "5px 6px", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: "5px", color: "var(--text)", fontSize: "10px" }}
-                            >
-                              <option value="">Merge with…</option>
-                              {otherStations.map(st => (
-                                <option key={st.key} value={st.key}>{st.label} ({st.km} km)</option>
-                              ))}
-                            </select>
-                            {(matchedUnique.isManualNameOverride || matchedUnique.isManualChargerOverride) && (
-                              <button className="reset-btn" onPointerDown={e => e.stopPropagation()} onClick={() => resetChargingStationOverride(v.id, node.log.key)} title="Reset this station to auto">Reset</button>
-                            )}
+                        <div className="station-meta-row">
+                          <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Infra Capex:</span>
+                          <strong className="num" style={{ fontSize: "11px", color: "var(--bev)" }}>
+                            {inr((node.stationInfo.stationSetupCost || 0) + (node.stationInfo.chargersCostSum || 0))}
+                          </strong>
+                        </div>
+
+                        {/* Merged Children Section inside same card */}
+                        {node.mergedChildren && node.mergedChildren.length > 0 && (
+                          <div className="merged-group-box">
+                            <div className="merged-group-title">
+                              <Link2 size={11} color="var(--bev)" />
+                              <span>Merged Route Passes ({node.mergedChildren.length}):</span>
+                            </div>
+                            {node.mergedChildren.map(child => (
+                              <div key={child.log.key} className="merged-child-row">
+                                <div>
+                                  <div style={{ fontWeight: 600, fontSize: "11px" }}>{child.log.label}</div>
+                                  <div className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>
+                                    {child.km} km · {child.log.socBefore}% → 100%
+                                  </div>
+                                </div>
+                                <button
+                                  className="cyber-unlink-btn"
+                                  onClick={() => updateChargingStationOverride(v.id, child.log.key, "mergedInto", null)}
+                                  title="Unmerge this stop"
+                                >
+                                  <Unlink size={11} /> Unlink
+                                </button>
+                              </div>
+                            ))}
                           </div>
                         )}
-                      </>
-                    ) : (
-                      <>
-                        <div className="standard-flow-title">{isStart ? node.name : node.name}</div>
-                        <div className="standard-flow-meta">{node.km} km</div>
-                      </>
+                      </div>
                     )}
                   </div>
                 </React.Fragment>
@@ -482,121 +616,171 @@ const FlowCanvas = ({ v, flowSequence, chargingStationOverrides, updateChargingS
           </div>
         </div>
       ) : (
-      <div className="flow-canvas-scroll-area">
-        <div style={{ width: `${maxX * zoom}px`, height: `${maxY * zoom}px`, position: 'relative' }}>
-          <div className="flow-canvas-container" style={{ width: `${maxX}px`, height: `${maxY}px`, transform: `scale(${zoom})`, transformOrigin: 'top left' }}>
-            <svg style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', zIndex: 1 }}>
-              {flowSequence.map((node, i) => {
-                if (i === 0) return null;
-                const prev = flowSequence[i - 1];
-                const key1 = prev.type === 'start' ? 'start-0' : (prev.type === 'waypoint' ? `wp-${prev.km}-${prev.name}` : prev.log.key);
-                const key2 = node.type === 'waypoint' ? `wp-${node.km}-${node.name}` : (node.type === 'start' ? 'start-0' : node.log.key);
-                const p1 = positions[key1];
-                const p2 = positions[key2];
+        /* MODE 2: HIGH PRECISION INTERACTIVE CANVAS */
+        <div
+          className={`interactive-canvas-surface ${isPanning ? 'is-panning' : ''}`}
+          onMouseDown={handleCanvasMouseDown}
+          onMouseMove={handleCanvasMouseMove}
+          onMouseUp={handleCanvasMouseUp}
+          onWheel={handleWheel}
+        >
+          <div
+            className="interactive-transform-layer"
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: "0 0"
+            }}
+          >
+            {/* SVG Connecting Curves */}
+            <svg style={{ position: "absolute", top: 0, left: 0, width: 4000, height: 3000, pointerEvents: "none", zIndex: 1 }}>
+              <defs>
+                <linearGradient id="edgeGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                  <stop offset="0%" stopColor="var(--bev)" stopOpacity="0.8" />
+                  <stop offset="100%" stopColor="var(--cyber-blue)" stopOpacity="0.8" />
+                </linearGradient>
+              </defs>
+              {visualEdges.map((edge) => {
+                const p1 = positions[edge.fromId];
+                const p2 = positions[edge.toId];
                 if (!p1 || !p2) return null;
-                const w1 = getWidthForType(prev.type);
-                const w2 = getWidthForType(node.type);
-                const x1 = p1.x + (w1 / 2), y1 = p1.y + 75;
-                const x2 = p2.x + (w2 / 2), y2 = p2.y + 75;
+
+                const node1 = masterNodes.find(n => n.id === edge.fromId);
+                const node2 = masterNodes.find(n => n.id === edge.toId);
+                const w1 = node1 ? getNodeWidth(node1) : 200;
+                const w2 = node2 ? getNodeWidth(node2) : 200;
+
+                const x1 = p1.x + (w1 / 2);
+                const y1 = p1.y + 70;
+                const x2 = p2.x + (w2 / 2);
+                const y2 = p2.y + 70;
+
                 const dx = Math.abs(x2 - x1);
-                const path = `M ${x1} ${y1} C ${x1 + dx / 2} ${y1}, ${x2 - dx / 2} ${y2}, ${x2} ${y2}`;
-                const distanceLabel = Math.round(node.km - prev.km);
-                if (distanceLabel === 0) return null;
-                const edgeKey = `edge-${key1}-${key2}`;
+                const path = `M ${x1} ${y1} C ${x1 + dx * 0.45} ${y1}, ${x2 - dx * 0.45} ${y2}, ${x2} ${y2}`;
+
                 return (
-                  <g key={edgeKey}>
-                    <path d={path} stroke="var(--border)" strokeWidth="3" fill="none" strokeDasharray="6,6" opacity="0.6" />
-                    <circle cx={x2} cy={y2} r="5" fill="var(--bev)" />
-                    <rect x={(x1 + x2) / 2 - 30} y={(y1 + y2) / 2 - 12} width="60" height="24" rx="4" fill="var(--panel)" stroke="var(--border)" />
-                    <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 + 4} fill="var(--text-dim)" fontSize="11" fontWeight="bold" textAnchor="middle" style={{ fontFamily: 'JetBrains Mono' }}>
-                      {distanceLabel} km
+                  <g key={edge.id}>
+                    <path d={path} stroke="url(#edgeGradient)" strokeWidth="2.5" fill="none" strokeDasharray="6 4" opacity="0.75" />
+                    <circle cx={x2} cy={y2} r="4" fill="var(--bev)" />
+                    <rect x={(x1 + x2) / 2 - 32} y={(y1 + y2) / 2 - 12} width="64" height="22" rx="6" fill="#0d121d" stroke="var(--border)" />
+                    <text x={(x1 + x2) / 2} y={(y1 + y2) / 2 + 3} fill="var(--text-dim)" fontSize="10" fontWeight="700" textAnchor="middle" style={{ fontFamily: "JetBrains Mono" }}>
+                      {edge.distance} km
                     </text>
                   </g>
                 );
               })}
             </svg>
 
-            {flowSequence.map((node) => {
-              const isStart = node.type === 'start';
-              const isWaypoint = node.type === 'waypoint';
-              const isCharge = node.type === 'charge';
-              const key = isStart ? 'start-0' : (isWaypoint ? `wp-${node.km}-${node.name}` : node.log.key);
-              const pos = positions[key] || { x: -1000, y: -1000 };
-              let override = {};
-              let matchedUnique = {};
-              let isMergedAway = false;
-              const isMergeTargetHovered = mergeTarget === key;
-
-              if (isCharge) {
-                matchedUnique = v.uniqueStationsList.find(st => st.key === node.log.key) || {};
-                override = chargingStationOverrides[v.id]?.[node.log.key] || {};
-                isMergedAway = matchedUnique.isMergedAway;
-              }
+            {/* Draggable Master Cards */}
+            {masterNodes.map((node) => {
+              const pos = positions[node.id] || { x: 0, y: 0 };
+              const isHoverTarget = hoveredMergeTarget === node.id;
+              const isDraggingThis = draggingKey === node.id;
+              const w = getNodeWidth(node);
 
               return (
                 <div
-                  key={key}
-                  className={`flow-node-wrapper ${isMergeTargetHovered ? 'merge-target' : ''}`}
-                  style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, zIndex: (draggingKey === key || isMergedAway) ? 10 : 2, width: getWidthForType(node.type) }}
-                  onPointerDown={(e) => handlePointerDown(e, key)}
-                  onPointerMove={(e) => handlePointerMove(e, node.type, key)}
-                  onPointerUp={(e) => handlePointerUp(e, node.type)}
+                  key={node.id}
+                  className={`canvas-node-card ${node.type} ${isHoverTarget ? "merge-drop-hover" : ""} ${isDraggingThis ? "is-dragging" : ""}`}
+                  style={{
+                    transform: `translate(${pos.x}px, ${pos.y}px)`,
+                    width: w,
+                    zIndex: isDraggingThis ? 50 : 10
+                  }}
+                  onMouseDown={(e) => startDraggingNode(e, node.id)}
                 >
-                  {isStart && (
-                    <div className="flow-node-card-interactive waypoint-card" style={{ width: '100%' }}>
-                      <div className="flow-dial start-dial">100%</div>
-                      <div style={{ fontSize: "12px", fontWeight: 700, margin: "6px 0" }}>{node.name}</div>
-                      <span className="badge badge-good" style={{ fontSize: "9px", marginBottom: "4px" }}>Origin Start</span>
-                      <div className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>0 km</div>
+                  {node.type === "start" && (
+                    <div className="canvas-card-body">
+                      <div className="card-top-bar">
+                        <span className="cyber-badge badge-good">START NODE</span>
+                        <span className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>0 km</span>
+                      </div>
+                      <div className="node-title">{node.name}</div>
+                      <div className="node-sub">Full Initial Departure SoC (100%)</div>
                     </div>
                   )}
 
-                  {isWaypoint && (
-                    <div className="flow-node-card-interactive waypoint-card" style={{ width: '100%' }}>
-                      <div className="flow-dial waypoint-dial"><MapPin size={18} color="var(--text-dim)" /></div>
-                      <div style={{ fontSize: "12px", fontWeight: 700, margin: "6px 0" }}>{node.name}</div>
-                      <span className="badge badge-muted" style={{ fontSize: "9px", marginBottom: "4px" }}>Load/Unload</span>
-                      <div className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>{node.km} km</div>
+                  {node.type === "waypoint" && (
+                    <div className="canvas-card-body">
+                      <div className="card-top-bar">
+                        <span className="cyber-badge badge-muted">WAYPOINT</span>
+                        <span className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>{node.km} km</span>
+                      </div>
+                      <div className="node-title">{node.name}</div>
+                      <div className="node-sub">Cargo Load/Unload Turnaround</div>
                     </div>
                   )}
 
-                  {isCharge && (
-                    <div className={`flow-node-card-interactive ${isMergedAway ? 'merged-node' : ''}`} style={{ width: '100%', borderColor: isMergedAway ? 'var(--text-dim)' : undefined }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "6px" }}>
-                        <div className="flow-dial">{node.log.socBefore}%</div>
+                  {node.type === "station" && (
+                    <div className="canvas-card-body">
+                      <div className="card-top-bar">
+                        <span className={`cyber-badge ${node.log.isDepot ? "badge-info" : "badge-warn"}`}>
+                          {node.log.isDepot ? "DEPOT TERMINAL" : "HIGHWAY CHARGER"}
+                        </span>
+                        <span className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>{node.km} km</span>
+                      </div>
+
+                      <div style={{ display: "flex", gap: "10px", alignItems: "center", margin: "6px 0 10px" }}>
+                        <CircularSoc soc={node.log.socBefore} color={node.log.isDepot ? "var(--bev)" : "var(--diesel)"} />
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <input type="text" value={typeof override.name === "string" ? override.name : ""} placeholder={matchedUnique.originalLabel || node.log.label}
-                            onChange={(e) => updateChargingStationOverride(v.id, node.log.key, "name", e.target.value)} onPointerDown={(e) => e.stopPropagation()}
-                            style={{ width: "100%", fontSize: "11px", fontWeight: 600, padding: "4px 6px", background: "var(--input-bg)", border: "1px solid var(--border)", borderRadius: "4px", color: "var(--text)" }} />
-                          <div style={{ display: "flex", gap: "6px", alignItems: "center", marginTop: "4px", flexWrap: "wrap" }}>
-                            <span className={`badge ${node.log.isDepot ? "badge-info" : "badge-warn"}`} style={{ fontSize: "9px" }}>{node.log.isDepot ? "Depot Terminal" : "Highway"}</span>
-                            <span className="num" style={{ fontSize: "10px", color: "var(--text-dim)" }}>{node.log.km} km</span>
+                          <input
+                            type="text"
+                            className="cyber-input"
+                            value={typeof node.nameOverride === "string" ? node.nameOverride : ""}
+                            placeholder={node.stationInfo.originalLabel || node.log.label}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            onChange={(e) => updateChargingStationOverride(v.id, node.id, "name", e.target.value)}
+                          />
+                          <div className="num" style={{ fontSize: "10.5px", color: "var(--bev)", marginTop: "4px" }}>
+                            {node.log.socBefore}% → 100% SoC
                           </div>
                         </div>
                       </div>
 
-                      {!isMergedAway && (
-                        <div style={{ background: "var(--panel-alt)", padding: "8px", borderRadius: "6px", fontSize: "11px", display: "flex", flexDirection: "column", gap: "4px", marginTop: "4px" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ color: "var(--text-dim)" }}>SoC Cycle:</span><span className="num"><strong>{node.log.socBefore}%</strong> → <strong>{node.log.socAfter}%</strong></span></div>
-                          <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px dashed var(--border)", paddingTop: "4px" }}><span style={{ color: "var(--text-dim)" }}>Station Capex:</span><span className="num" style={{ color: "var(--bev)" }}>{inr((matchedUnique.stationSetupCost || 0) + (matchedUnique.chargersCostSum || 0))}</span></div>
-                        </div>
-                      )}
+                      <div className="station-meta-row">
+                        <span style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Plugs (Auto: {node.stationInfo.autoChargersSized ?? 1}):</span>
+                        <input
+                          type="number" min="0" step="1"
+                          className="cyber-input-mini"
+                          value={Number.isFinite(node.chargerOverride) ? node.chargerOverride : (node.stationInfo.autoChargersSized ?? 1)}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onChange={(e) => updateChargingStationOverride(v.id, node.id, "chargers", Math.max(0, Math.round(parseFloat(e.target.value) || 0)))}
+                        />
+                      </div>
 
-                      {isMergedAway ? (
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", background: "rgba(33,196,175,0.08)", border: "1px dashed var(--bev)", borderRadius: "6px", padding: "6px 8px" }}>
-                          <span style={{ fontSize: "10.5px", color: "var(--bev)", display: "flex", alignItems: "center", gap: "4px" }}><Link2 size={11} /> Shares infra with "{matchedUnique.mergedIntoLabel}"</span>
-                          <button className="reset-btn" onPointerDown={e => e.stopPropagation()} onClick={() => updateChargingStationOverride(v.id, node.log.key, "mergedInto", null)} title="Unlink" style={{ padding: "4px 6px" }}><Unlink size={11} /></button>
-                        </div>
-                      ) : (
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "6px", marginTop: "4px" }}>
-                          <div style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Plugs (Auto: {matchedUnique.autoChargersSized}):</div>
-                          <div className="field-input" style={{ width: "70px" }}>
-                            <input type="number" min="0" step="1" value={Number.isFinite(override.chargers) ? override.chargers : matchedUnique.autoChargersSized}
-                              onPointerDown={e => e.stopPropagation()} onChange={(e) => updateChargingStationOverride(v.id, node.log.key, "chargers", Math.max(0, Math.round(parseFloat(e.target.value) || 0)))} style={{ width: "45px", padding: "4px" }} />
+                      <div className="station-meta-row" style={{ borderBottom: "none", paddingBottom: 0 }}>
+                        <span style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Station Capex:</span>
+                        <strong className="num" style={{ fontSize: "11px", color: "var(--bev)" }}>
+                          {inr((node.stationInfo.stationSetupCost || 0) + (node.stationInfo.chargersCostSum || 0))}
+                        </strong>
+                      </div>
+
+                      {/* CONSOLIDATED MERGED STATIONS SECTION INSIDE SAME CARD */}
+                      {node.mergedChildren && node.mergedChildren.length > 0 && (
+                        <div className="merged-group-box">
+                          <div className="merged-group-title">
+                            <Link2 size={11} color="var(--bev)" />
+                            <span>Linked Passes ({node.mergedChildren.length}):</span>
                           </div>
-                          {(matchedUnique.isManualNameOverride || matchedUnique.isManualChargerOverride) && (
-                            <button className="reset-btn" onPointerDown={e => e.stopPropagation()} onClick={() => resetChargingStationOverride(v.id, node.log.key)} title="Reset to auto" style={{ padding: "4px 6px" }}><RotateCcw size={11} /></button>
-                          )}
+                          {node.mergedChildren.map(child => (
+                            <div key={child.log.key} className="merged-child-row">
+                              <div style={{ flex: 1, minWidth: 0 }}>
+                                <div style={{ fontSize: "10.5px", fontWeight: 600, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {child.log.label}
+                                </div>
+                                <div className="num" style={{ fontSize: "9.5px", color: "var(--text-dim)" }}>
+                                  {child.km} km · {child.log.socBefore}% → 100%
+                                </div>
+                              </div>
+                              <button
+                                className="cyber-unlink-btn"
+                                onMouseDown={(e) => e.stopPropagation()}
+                                onClick={() => updateChargingStationOverride(v.id, child.log.key, "mergedInto", null)}
+                                title="Unmerge this pass"
+                              >
+                                <Unlink size={10} /> Unlink
+                              </button>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>
@@ -606,7 +790,6 @@ const FlowCanvas = ({ v, flowSequence, chargingStationOverrides, updateChargingS
             })}
           </div>
         </div>
-      </div>
       )}
     </div>
   );
@@ -643,7 +826,7 @@ const INITIAL_VEHICLES = [
 ];
 
 // ---------------------------------------------------------------------------
-// CORE ENGINE
+// CORE COMPUTATION ENGINE
 // ---------------------------------------------------------------------------
 function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, dieselMatrix, evMatrix) {
   const {
@@ -1080,20 +1263,9 @@ function computeVehicleMetrics(v, routeSegments, cfg, chargingStationOverrides, 
   const loopTonneKm = tonneKmPerTrip;
   const loopCargoTonnes = cargoTonnesPerTrip;
 
-  // Unit-economics convention: calculate the per-ton cost for each route side
-  // and add those rates together for the full loop. Then derive ₹/ton-km
-  // directly from that loop ₹/ton figure and the total route distance.
-  // This avoids the previous tonne-km / cargo-tonnage weighting error.
   const routeDistanceForCost = Math.max(0.0001, routeSegments.reduce((sum, seg) => sum + Math.max(0, seg.distance || 0), 0));
-  // Per-ton loop cost is the per-ton rate for each side of the movement added together.
-  // Do not reconstruct it from tonne-km.
   const loopCostPerTonneTrip = Math.max(0, costPerTonne) + Math.max(0, costPerTonne);
-  // Per-ton-km is simply the loop per-ton cost divided by the route distance.
   const loopCostPerTonneKm = loopCostPerTonneTrip / routeDistanceForCost;
-
-  const segmentCostPerTonneBase = routeSegments.length > 0
-    ? routeSegments.map(seg => loopCostPerTonneTrip * (Math.max(0, seg.distance || 0) / routeDistanceForCost))
-    : [];
 
   const loopFreightRatePerTonneKm = requiredFreightRatePerTonneKm;
   const totalFreightRatePerTonneTrip = (loopFreightRatePerTonneKm > 0 && loopCargoTonnes > 0)
@@ -1207,6 +1379,9 @@ function buildMonthlyBatteryTimeline(v, years) {
   return timeline;
 }
 
+// ---------------------------------------------------------------------------
+// MAIN APPLICATION COMPONENT
+// ---------------------------------------------------------------------------
 export default function ComprehensiveTCOCalculator() {
   const [darkMode, setDarkMode] = useState(true);
   
@@ -1228,15 +1403,15 @@ export default function ComprehensiveTCOCalculator() {
   const [discountRate, setDiscountRate] = useState(10);
 
   // Active Cost Escalations (% p.a.)
-  const [escFuel, setEscFuel] = useState(1.0);              // Tariff (Diesel)
-  const [escElectricity, setEscElectricity] = useState(2.0); // Energy Cost
-  const [escAMC, setEscAMC] = useState(0.0);                 // AMC (Maintenance)
-  const [escToll, setEscToll] = useState(0.0);               // Toll
-  const [escTyre, setEscTyre] = useState(2.0);               // Tyre
-  const [escMisc, setEscMisc] = useState(2.0);                // Misc. & Corporate Overheads
-  const [escInsurance, setEscInsurance] = useState(1.0);      // Insurance
-  const [escWages, setEscWages] = useState(5.0);              // Driver & Infra Manpower Salary
-  const [escLandLease, setEscLandLease] = useState(7.0);      // Land Lease rental
+  const [escFuel, setEscFuel] = useState(1.0);
+  const [escElectricity, setEscElectricity] = useState(2.0);
+  const [escAMC, setEscAMC] = useState(0.0);
+  const [escToll, setEscToll] = useState(0.0);
+  const [escTyre, setEscTyre] = useState(2.0);
+  const [escMisc, setEscMisc] = useState(2.0);
+  const [escInsurance, setEscInsurance] = useState(1.0);
+  const [escWages, setEscWages] = useState(5.0);
+  const [escLandLease, setEscLandLease] = useState(7.0);
 
   const [routeSegments, setRouteSegments] = useState(DEFAULT_ROUTE.map((s, i) => ({
     ...s, monthlyTonnage: i === 1 ? 0 : 85000
@@ -1546,196 +1721,303 @@ export default function ComprehensiveTCOCalculator() {
   return (
     <div className={`wrap ${darkMode ? "dark-theme" : "light-theme"}`}>
       <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+
         .wrap {
-          --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-          --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-          --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-          --shadow-glow: 0 0 15px rgba(33, 196, 175, 0.15);
-          background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif;
-          width: 100%; max-width: 1400px; min-height: 100vh; margin: 0 auto; padding: 24px;
-          border-radius: 12px; box-sizing: border-box; text-align: left; overflow-x: hidden;
-          transition: all 0.2s ease-in-out; -webkit-font-smoothing: antialiased;
+          --cyber-cyan: #00f2fe;
+          --cyber-mint: #00e5a3;
+          --cyber-blue: #38bdf8;
+          --cyber-purple: #818cf8;
+          --cyber-amber: #f59e0b;
+          --cyber-rose: #f43f5e;
+          --shadow-glow: 0 0 20px rgba(0, 229, 163, 0.15);
+          --shadow-cyan-glow: 0 0 20px rgba(0, 242, 254, 0.2);
+
+          font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+          width: 100%; max-width: 1440px; min-height: 100vh; margin: 0 auto; padding: 24px;
+          border-radius: 16px; box-sizing: border-box; text-align: left; overflow-x: hidden;
+          transition: background-color 0.2s ease, color 0.2s ease; -webkit-font-smoothing: antialiased;
         }
-        html { overflow-y: scroll; }
-        body { margin: 0; }
-        .wrap * { box-sizing: border-box; }
-        .wrap, .wrap * { color: var(--text); }
-        .wrap .panel { width: 100%; min-width: 0; overflow: hidden; }
-        .wrap .anim-fade { width: 100%; min-width: 0; text-align: left; }
-        .wrap .anim-fade > * { min-width: 0; }
-        .wrap table { max-width: 100%; }
-        .wrap .route-table { min-width: 1120px; }
-        .wrap .sub-tabs { align-items: center; }
-        .wrap.dark-theme { --bg: #090b0c; --panel: #131719; --panel-alt: #1a2022; --border: #262f32; --text: #f3f4f6; --text-dim: #9ca3af; --bev: #21bfa9; --diesel: #e29532; --good: #10b981; --bad: #ef4444; --input-bg: #0d0f10; }
-        .wrap.light-theme { --bg: #f9fafb; --panel: #ffffff; --panel-alt: #f3f4f6; --border: #e5e7eb; --text: #111827; --text-dim: #6b7280; --bev: #129382; --diesel: #be7a21; --good: #059669; --bad: #dc2626; --input-bg: #f9fafb; }
-        h1, h2, h3, .display { font-family: 'Barlow Condensed', sans-serif; letter-spacing: 0.02em; }
-        .num { font-family: 'JetBrains Mono', monospace; font-weight: 500; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1.5px solid var(--border); padding-bottom: 16px; flex-wrap: wrap; gap: 16px; }
-        .header h1 { font-size: 26px; font-weight: 700; margin: 0; text-transform: uppercase; }
+
+        .wrap.dark-theme {
+          --bg: #07090e;
+          --panel: #0d121d;
+          --panel-alt: #131a29;
+          --panel-hover: #182235;
+          --border: #1e293b;
+          --border-bright: #334155;
+          --text: #f8fafc;
+          --text-dim: #8b9bb4;
+          --bev: #00e5a3;
+          --diesel: #f59e0b;
+          --good: #00e5a3;
+          --bad: #f43f5e;
+          --input-bg: #090d15;
+          background: var(--bg); color: var(--text);
+        }
+
+        .wrap.light-theme {
+          --bg: #f8fafc;
+          --panel: #ffffff;
+          --panel-alt: #f1f5f9;
+          --panel-hover: #e2e8f0;
+          --border: #cbd5e1;
+          --border-bright: #94a3b8;
+          --text: #0f172a;
+          --text-dim: #64748b;
+          --bev: #0d9488;
+          --diesel: #d97706;
+          --good: #059669;
+          --bad: #e11d48;
+          --input-bg: #f8fafc;
+          background: var(--bg); color: var(--text);
+        }
+
+        .num { font-family: 'JetBrains Mono', monospace; letter-spacing: -0.02em; }
         
-        .tabs { display: flex; gap: 8px; margin-bottom: 24px; border-bottom: 2px solid var(--border); padding-bottom: 0px; overflow-x: auto; scrollbar-width: none; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 18px; flex-wrap: wrap; gap: 16px; }
+        .header-title { font-size: 22px; font-weight: 800; letter-spacing: -0.03em; display: flex; align-items: center; gap: 10px; background: linear-gradient(135deg, var(--text) 0%, var(--cyber-mint) 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        
+        .tabs { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 0; overflow-x: auto; scrollbar-width: none; }
         .tabs::-webkit-scrollbar { display: none; }
-        .tab { display: flex; align-items: center; gap: 6px; background: transparent; border: 2px solid transparent; border-bottom: none; padding: 12px 20px; color: var(--text-dim); cursor: pointer; font-size: 14px; font-weight: 600; border-radius: 8px 8px 0 0; transition: all 0.2s; white-space: nowrap; margin-bottom: -2px; }
+        .tab { display: flex; align-items: center; gap: 8px; background: transparent; border: 1px solid transparent; border-bottom: none; padding: 12px 18px; color: var(--text-dim); cursor: pointer; font-size: 13.5px; font-weight: 600; border-radius: 10px 10px 0 0; transition: all 0.2s ease; white-space: nowrap; margin-bottom: -1px; }
         .tab:hover { color: var(--text); background: var(--panel-alt); }
         .tab.active { background: var(--panel); color: var(--bev); border-color: var(--border); border-bottom-color: var(--panel); box-shadow: 0 -2px 0 var(--bev) inset; }
         
-        .sub-tabs { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
-        .sub-tab { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 20px; border: 1px solid var(--border); background: var(--panel-alt); color: var(--text-dim); cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s; }
+        .sub-tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+        .sub-tab { display: flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 20px; border: 1px solid var(--border); background: var(--panel-alt); color: var(--text-dim); cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s ease; }
         .sub-tab:hover { border-color: var(--bev); color: var(--text); }
-        .sub-tab.active { background: var(--bev); color: #0c0e0f; border-color: var(--bev); }
+        .sub-tab.active { background: linear-gradient(135deg, var(--cyber-cyan) 0%, var(--cyber-mint) 100%); color: #07090e; border-color: transparent; font-weight: 700; box-shadow: var(--shadow-glow); }
         
-        .theme-btn, .reset-btn, .add-btn { display: flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 500; box-shadow: var(--shadow-sm); transition: all 0.15s ease-in-out; }
+        .theme-btn, .reset-btn, .add-btn { display: flex; align-items: center; gap: 6px; background: var(--panel); border: 1px solid var(--border); color: var(--text); padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.15s ease; }
         .theme-btn:hover, .reset-btn:hover, .add-btn:hover { border-color: var(--bev); background: var(--panel-alt); }
-        .theme-btn:disabled, .add-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: var(--shadow-md); margin-bottom: 24px; animation: fadeIn 0.3s ease-out; }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-        .panel h2 { font-size: 18px; margin: 0 0 20px; text-transform: uppercase; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+        
+        .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 24px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.25); margin-bottom: 24px; animation: fadeIn 0.25s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+        .panel h2 { font-size: 17px; font-weight: 700; margin: 0 0 20px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); padding-bottom: 12px; letter-spacing: -0.01em; }
+        
         .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
-        .grid-auto-fit { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }
+        .grid-auto-fit { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
         @media(max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+        
         .field { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
-        .field-label { font-size: 13px; color: var(--text-dim); flex: 1; }
-        .field-input { display: flex; align-items: center; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color 0.15s ease-in-out; }
-        .field-input:focus-within { border-color: var(--bev); }
-        .field-input input { width: 100px; background: transparent; border: none; color: var(--text); padding: 8px 10px; font-family: 'JetBrains Mono', monospace; font-size: 13px; text-align: right; }
+        .field-label { font-size: 12.5px; color: var(--text-dim); flex: 1; }
+        .field-input { display: flex; align-items: center; background: var(--input-bg); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; transition: border-color 0.15s ease; }
+        .field-input:focus-within { border-color: var(--bev); box-shadow: 0 0 0 2px rgba(0, 229, 163, 0.15); }
+        .field-input input { width: 105px; background: transparent; border: none; color: var(--text); padding: 8px 10px; font-family: 'JetBrains Mono', monospace; font-size: 12.5px; text-align: right; }
         .field-input input:focus { outline: none; }
-        .field-suffix { font-size: 11px; color: var(--text-dim); padding-right: 10px; font-weight: 500; }
-        .compact-input { background: var(--input-bg); border: 1px solid var(--border); color: var(--text); padding: 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 11px; text-align: right; width: 100%; transition: 0.15s; }
+        .field-suffix { font-size: 11px; color: var(--text-dim); padding-right: 10px; font-weight: 600; }
+        
+        .compact-input { background: var(--input-bg); border: 1px solid var(--border); color: var(--text); padding: 6px; border-radius: 6px; font-family: 'JetBrains Mono', monospace; font-size: 11px; text-align: right; width: 100%; }
         .compact-input:focus { border-color: var(--bev); outline: none; }
-        .route-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }
-        .route-table th { background: var(--panel-alt); padding: 12px; color: var(--text-dim); border-bottom: 2px solid var(--border); text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; white-space: nowrap; }
+        
+        .route-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 12.5px; }
+        .route-table th { background: var(--panel-alt); padding: 12px; color: var(--text-dim); border-bottom: 2px solid var(--border); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
         .route-table td { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-        .route-table input, .route-table select { background: var(--input-bg); border: 1px solid var(--border); color: var(--text); padding: 8px; border-radius: 6px; font-size: 13px; }
+        .route-table input, .route-table select { background: var(--input-bg); border: 1px solid var(--border); color: var(--text); padding: 8px; border-radius: 6px; font-size: 12.5px; }
         .route-table input[type="text"] { width: 100%; }
         .route-table input[type="number"] { width: 85px; text-align: right; }
-        .expand-btn { background: transparent; border: 1px solid var(--border); color: var(--bev); padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 500; }
-        .expand-btn:hover { background: rgba(33, 196, 175, 0.05); border-color: var(--bev); }
-        .stretch-drawer { background: var(--panel-alt); border: 1px dashed var(--border); border-radius: 10px; padding: 16px; margin-top: 8px; }
+        
+        .expand-btn { background: var(--panel-alt); border: 1px solid var(--border); color: var(--bev); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 11.5px; font-weight: 600; transition: 0.15s; }
+        .expand-btn:hover { background: rgba(0, 229, 163, 0.1); border-color: var(--bev); }
+        .stretch-drawer { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin-top: 8px; }
         .stretch-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 12px; }
         @media(max-width: 1024px) { .stretch-grid { grid-template-columns: repeat(2, 1fr); } }
         .stretch-card { background: var(--panel); border: 1px solid var(--border); padding: 12px; border-radius: 8px; }
+        
         .vehicle-deck { display: grid; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); gap: 20px; margin-top: 16px; }
-        .vehicle-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; box-shadow: var(--shadow-md); transition: border-color 0.2s ease-in-out; }
-        .vehicle-card.active-electric { border-top: 4px solid var(--bev); }
-        .vehicle-card.active-diesel { border-top: 4px solid var(--diesel); }
+        .vehicle-card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 24px; box-shadow: 0 4px 20px rgba(0,0,0,0.2); }
+        .vehicle-card.active-electric { border-top: 3px solid var(--bev); }
+        .vehicle-card.active-diesel { border-top: 3px solid var(--diesel); }
         .vcard-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
-        .vcard-title { font-size: 18px; font-weight: 700; text-transform: uppercase; }
+        .vcard-title { font-size: 16px; font-weight: 700; }
+        
         .seg { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--input-bg); }
-        .seg button { flex: 1; background: transparent; color: var(--text-dim); border: none; padding: 8px 12px; font-size: 12px; font-weight: 500; cursor: pointer; }
-        .seg button.active { background: var(--bev); color: #0c0e0f; font-weight: 600; }
+        .seg button { flex: 1; background: transparent; color: var(--text-dim); border: none; padding: 8px 12px; font-size: 12px; font-weight: 600; cursor: pointer; }
+        .seg button.active { background: linear-gradient(135deg, var(--cyber-cyan) 0%, var(--cyber-mint) 100%); color: #07090e; }
+        
         .kpi-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px; margin-bottom: 24px; }
-        .kpi-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 10px; padding: 16px; box-shadow: var(--shadow-sm); }
-        .kpi-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; letter-spacing: 0.05em; font-weight: 600; }
-        .kpi-val { font-size: 24px; font-weight: 700; margin-bottom: 6px; }
-        .kpi-sub { font-size: 12px; color: var(--text-dim); margin-top: 4px; line-height: 1.5; }
-        .alert-strip { background: rgba(239, 68, 68, 0.08); border: 1px solid var(--bad); color: var(--text); border-radius: 8px; padding: 14px; font-size: 13px; margin-bottom: 24px; display: flex; align-items: flex-start; gap: 10px; line-height: 1.4; }
-        .breakeven-strip { background: rgba(33, 196, 175, 0.08); border: 1px solid var(--bev); color: var(--text); border-radius: 8px; padding: 16px 18px; font-size: 13px; margin-bottom: 24px; display: flex; align-items: center; gap: 14px; line-height: 1.4; }
-        .section-tag { font-size: 11px; font-weight: 700; color: var(--bev); text-transform: uppercase; letter-spacing: 0.08em; margin: 20px 0 10px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
-        .badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; }
-        .badge-good { background: rgba(16, 185, 129, 0.1); color: var(--good); border: 1px solid rgba(16, 185, 129, 0.2); }
-        .badge-warn { background: rgba(226, 149, 50, 0.1); color: var(--diesel); border: 1px solid rgba(226, 149, 50, 0.2); }
-        .badge-info { background: rgba(33, 196, 175, 0.1); color: var(--bev); border: 1px solid rgba(33, 196, 175, 0.2); }
+        .kpi-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 12px; padding: 18px; position: relative; overflow: hidden; }
+        .kpi-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; letter-spacing: 0.05em; font-weight: 700; }
+        .kpi-val { font-size: 26px; font-weight: 800; margin-bottom: 6px; letter-spacing: -0.03em; }
+        .kpi-sub { font-size: 11.5px; color: var(--text-dim); margin-top: 6px; line-height: 1.5; }
+        
+        .alert-strip { background: rgba(244, 63, 94, 0.08); border: 1px solid var(--bad); color: var(--text); border-radius: 10px; padding: 14px; font-size: 13px; margin-bottom: 24px; display: flex; align-items: flex-start; gap: 12px; }
+        .breakeven-strip { background: linear-gradient(90deg, rgba(0, 229, 163, 0.1) 0%, rgba(0, 242, 254, 0.05) 100%); border: 1px solid var(--bev); border-radius: 10px; padding: 16px 18px; font-size: 13.5px; margin-bottom: 24px; display: flex; align-items: center; gap: 14px; }
+        .section-tag { font-size: 11px; font-weight: 800; color: var(--bev); text-transform: uppercase; letter-spacing: 0.08em; margin: 20px 0 10px; border-bottom: 1px solid var(--border); padding-bottom: 4px; }
+        
+        .cyber-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; font-size: 9.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
+        .badge-good { background: rgba(0, 229, 163, 0.12); color: var(--good); border: 1px solid rgba(0, 229, 163, 0.3); }
+        .badge-warn { background: rgba(245, 158, 11, 0.12); color: var(--diesel); border: 1px solid rgba(245, 158, 11, 0.3); }
+        .badge-info { background: rgba(0, 242, 254, 0.12); color: var(--cyber-cyan); border: 1px solid rgba(0, 242, 254, 0.3); }
         .badge-muted { background: rgba(148, 163, 184, 0.12); color: var(--text-dim); border: 1px solid var(--border); }
+        
         .optimizer-box { background: var(--panel-alt); border: 1px dashed var(--bev); border-radius: 10px; padding: 14px; margin-top: 12px; }
         .optimizer-result { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-top: 10px; font-size: 12px; }
-        .mini-btn { display: inline-flex; align-items: center; gap: 6px; background: var(--bev); color: #0c0e0f; border: none; padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
-        .mini-btn-outline { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: var(--bev); border: 1px solid var(--bev); padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
-        .seg-cost-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
-        .seg-cost-table th { text-align: right; padding: 8px 10px; color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; border-bottom: 2px solid var(--border); }
-        .seg-cost-table th:first-child { text-align: left; }
-        .seg-cost-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-        .seg-cost-table td:first-child { text-align: left; color: var(--text-dim); }
-        .time-split-table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 14px; }
-        .time-split-table th { text-align: right; padding: 8px 10px; color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; border-bottom: 2px solid var(--border); }
-        .time-split-table th:first-child { text-align: left; }
-        .time-split-table td { text-align: right; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
-        .time-split-table td:first-child { text-align: left; }
+        .mini-btn { display: inline-flex; align-items: center; gap: 6px; background: linear-gradient(135deg, var(--cyber-cyan) 0%, var(--cyber-mint) 100%); color: #07090e; border: none; padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 700; }
+        .mini-btn-outline { display: inline-flex; align-items: center; gap: 6px; background: transparent; color: var(--text); border: 1px solid var(--border); padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 11.5px; font-weight: 600; }
+        .mini-btn-outline:hover { border-color: var(--bev); color: var(--bev); }
+        
+        .seg-cost-table, .time-split-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+        .seg-cost-table th, .time-split-table th { text-align: right; padding: 10px; color: var(--text-dim); font-size: 11px; font-weight: 700; text-transform: uppercase; border-bottom: 2px solid var(--border); }
+        .seg-cost-table th:first-child, .time-split-table th:first-child { text-align: left; }
+        .seg-cost-table td, .time-split-table td { text-align: right; padding: 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+        .seg-cost-table td:first-child, .time-split-table td:first-child { text-align: left; }
 
-        .donut-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 12px; padding: 18px; display: flex; flex-direction: column; align-items: center; }
-        .donut-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; justify-content: center; margin-top: 14px; }
+        .donut-card { background: var(--panel-alt); border: 1px solid var(--border); border-radius: 12px; padding: 20px; display: flex; flex-direction: column; align-items: center; }
+        .donut-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; justify-content: center; margin-top: 14px; }
         .donut-legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); }
         .donut-legend-color { width: 8px; height: 8px; border-radius: 50%; }
 
-        /* Custom Flow Canvas styling */
+        /* ========================================================================= */
+        /* DIGITAL TWIN FLOW CANVAS & AUTO-WRAPPING PIPELINE STYLES                 */
+        /* ========================================================================= */
         .flow-canvas-viewport {
-          width: 100%; height: 500px; overflow: hidden;
-          background-color: var(--panel-alt);
-          border: 1px solid var(--border); border-radius: 12px;
-          position: relative;
+          width: 100%; height: 560px; overflow: hidden;
+          background: #07090e;
+          border: 1px solid var(--border); border-radius: 14px;
+          position: relative; box-shadow: inset 0 0 40px rgba(0,0,0,0.5);
         }
         .flow-canvas-viewport:fullscreen { width: 100vw; height: 100vh; border-radius: 0; }
+
         .flow-canvas-toolbar {
-          position: absolute; top: 10px; left: 10px; right: 10px; z-index: 20;
+          position: absolute; top: 12px; left: 12px; right: 12px; z-index: 30;
           display: flex; justify-content: space-between; align-items: center; gap: 12px;
           pointer-events: none;
         }
         .flow-canvas-help, .flow-canvas-controls {
-          pointer-events: auto; background: var(--panel); border: 1px solid var(--border);
-          border-radius: 8px; box-shadow: var(--shadow-md); padding: 7px 9px;
+          pointer-events: auto; background: rgba(13, 18, 29, 0.85); backdrop-filter: blur(12px);
+          border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+          padding: 8px 12px;
         }
-        .flow-canvas-help { display: flex; gap: 7px; align-items: center; font-size: 10.5px; color: var(--text-dim); max-width: 70%; }
-        .flow-canvas-controls { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-        .flow-mode-toggle { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; margin-right: 3px; }
-        .flow-mode-toggle button { display: inline-flex; align-items: center; gap: 4px; border: 0; background: transparent; color: var(--text-dim); padding: 6px 8px; font-size: 10px; font-weight: 700; cursor: pointer; }
-        .flow-mode-toggle button.active { background: var(--bev); color: #08100f; }
-        .flow-zoom-label { min-width: 42px; text-align: center; font: 700 10px 'JetBrains Mono', monospace; color: var(--text-dim); }
-        .flow-canvas-scroll-area { width: 100%; height: 100%; overflow: auto; padding-top: 54px; box-sizing: border-box; }
-        .flow-canvas-scroll-area::-webkit-scrollbar { width: 10px; height: 10px; }
-        .flow-canvas-scroll-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
-        .flow-canvas-scroll-area::-webkit-scrollbar-track { background: var(--panel-alt); }
-        .flow-canvas-container {
-          min-width: 1800px; min-height: 1200px;
-          position: relative;
-          background-image: radial-gradient(var(--border) 1px, transparent 1px);
-          background-size: 20px 20px;
+        .flow-canvas-help { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--text-dim); }
+        .flow-canvas-controls { display: flex; align-items: center; gap: 6px; }
+        .flow-mode-toggle { display: flex; align-items: center; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; margin-right: 4px; }
+        .flow-mode-toggle button { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--text-dim); padding: 6px 10px; font-size: 11px; font-weight: 700; cursor: pointer; }
+        .flow-mode-toggle button.active { background: linear-gradient(135deg, var(--cyber-cyan) 0%, var(--cyber-mint) 100%); color: #07090e; font-weight: 800; }
+        .flow-zoom-label { min-width: 44px; text-align: center; font: 700 11px 'JetBrains Mono', monospace; color: var(--text-dim); }
+
+        .status-dot-pulse {
+          width: 8px; height: 8px; border-radius: 50%; background: var(--cyber-mint);
+          box-shadow: 0 0 10px var(--cyber-mint);
+          animation: pulseGlow 2s infinite ease-in-out;
         }
-        .flow-node-wrapper {
-          position: absolute; cursor: grab; user-select: none;
-          transition: box-shadow 0.2s, outline 0.2s;
+        @keyframes pulseGlow { 0%, 100% { transform: scale(0.9); opacity: 0.7; } 50% { transform: scale(1.2); opacity: 1; } }
+
+        /* Interactive Canvas Drag Surface */
+        .interactive-canvas-surface {
+          width: 100%; height: 100%; cursor: grab; position: relative; user-select: none;
+          background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px);
+          background-size: 24px 24px;
         }
-        .flow-node-wrapper:active { cursor: grabbing; }
-        .flow-node-wrapper.merge-target {
-          outline: 3px solid var(--bev); box-shadow: 0 0 20px rgba(33, 196, 175, 0.4); border-radius: 12px;
+        .interactive-canvas-surface.is-panning { cursor: grabbing; }
+        .interactive-transform-layer { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+
+        .canvas-node-card {
+          position: absolute; background: rgba(13, 18, 29, 0.95); backdrop-filter: blur(12px);
+          border: 1px solid var(--border); border-radius: 12px; padding: 14px;
+          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); cursor: grab; transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        .canvas-node-card:active { cursor: grabbing; }
+        .canvas-node-card.station { border-top: 3px solid var(--bev); }
+        .canvas-node-card.start { border-top: 3px solid var(--good); }
+        .canvas-node-card.waypoint { border-top: 3px solid var(--text-dim); }
+        .canvas-node-card.is-dragging { box-shadow: 0 12px 36px rgba(0,0,0,0.8), var(--shadow-cyan-glow); border-color: var(--cyber-cyan); }
+        .canvas-node-card.merge-drop-hover { outline: 2px solid var(--cyber-mint); box-shadow: 0 0 30px rgba(0, 229, 163, 0.5); transform: scale(1.02); }
+
+        .card-top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        .node-title { font-size: 13px; font-weight: 700; color: var(--text); line-height: 1.3; }
+        .node-sub { font-size: 10.5px; color: var(--text-dim); margin-top: 4px; }
+
+        .cyber-input {
+          width: 100%; background: var(--input-bg); border: 1px solid var(--border);
+          border-radius: 6px; color: var(--text); padding: 5px 8px; font-size: 11.5px; font-weight: 700;
+        }
+        .cyber-input:focus { border-color: var(--bev); outline: none; }
+        .cyber-input-mini {
+          width: 55px; background: var(--input-bg); border: 1px solid var(--border);
+          border-radius: 6px; color: var(--text); padding: 4px 6px; font-size: 11px; font-family: 'JetBrains Mono', monospace; text-align: right;
+        }
+        .cyber-input-mini:focus { border-color: var(--bev); outline: none; }
+
+        .station-meta-row {
+          display: flex; justify-content: space-between; align-items: center; gap: 8px;
+          padding: 6px 0; border-bottom: 1px dashed var(--border);
         }
 
-        .flow-node-card-interactive { 
-          background: var(--panel); border: 1.5px solid var(--border); border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 10px; box-shadow: var(--shadow-sm); 
+        /* Seamless Merged Group Container */
+        .merged-group-box {
+          background: rgba(0, 229, 163, 0.04); border: 1px solid rgba(0, 229, 163, 0.2);
+          border-radius: 8px; padding: 8px; margin-top: 10px;
         }
-        .flow-node-card-interactive.merged-node { background: rgba(0,0,0,0.1); box-shadow: none; }
-        .flow-node-card-interactive.waypoint-card { background: var(--panel-alt); align-items: center; text-align: center; }
-        
-        .flow-dial { width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 11px; border: 3px solid var(--bev); background: var(--panel-alt); box-shadow: 0 0 0 3px rgba(33,196,175,0.08); flex-shrink: 0; }
-        .flow-dial.start-dial { border-color: var(--good); box-shadow: 0 0 0 3px rgba(16,185,129,0.08); }
-        .flow-dial.waypoint-dial { border-color: var(--text-dim); box-shadow: none; background: var(--panel); }
-        .standard-flow-scroll { padding: 70px 40px 40px; }
-        .standard-flow-container { width: 420px; margin: 0 auto; padding: 10px 0 30px; }
-        .standard-flow-node { width: 100%; box-sizing: border-box; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; box-shadow: var(--shadow-sm); }
-        .standard-flow-node.charge { border-left: 3px solid var(--bev); }
-        .standard-flow-node.start { border-left: 3px solid var(--good); }
-        .standard-flow-node.waypoint { border-left: 3px solid var(--text-dim); }
-        .standard-flow-badge { display: inline-block; font-size: 8px; font-weight: 800; letter-spacing: .08em; color: var(--bev); margin-bottom: 5px; }
-        .standard-flow-node.start .standard-flow-badge { color: var(--good); }
-        .standard-flow-node.waypoint .standard-flow-badge { color: var(--text-dim); }
-        .standard-flow-title { font-size: 12px; font-weight: 700; color: var(--text); line-height: 1.35; }
-        .standard-flow-meta, .standard-flow-sub { font-size: 10px; color: var(--text-dim); margin-top: 5px; }
-        .standard-flow-sub { color: var(--bev); font-family: 'JetBrains Mono', monospace; }
-        .standard-flow-connector { height: 46px; position: relative; display: flex; justify-content: center; align-items: center; }
-        .standard-flow-connector::before { content: ""; position: absolute; top: 0; bottom: 0; width: 2px; background: var(--border); }
-        .standard-flow-connector span { position: relative; z-index: 1; background: var(--panel-alt); border: 1px solid var(--border); border-radius: 999px; padding: 3px 7px; color: var(--text-dim); font: 700 9px 'JetBrains Mono', monospace; }
+        .merged-group-title {
+          font-size: 10.5px; font-weight: 700; color: var(--cyber-mint); display: flex;
+          align-items: center; gap: 5px; margin-bottom: 6px;
+        }
+        .merged-child-row {
+          display: flex; justify-content: space-between; align-items: center; gap: 8px;
+          background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px;
+          padding: 5px 8px; margin-bottom: 4px;
+        }
+        .merged-child-row:last-child { margin-bottom: 0; }
+        .cyber-unlink-btn {
+          background: transparent; border: 1px solid var(--border); border-radius: 4px;
+          color: var(--text-dim); padding: 3px 6px; font-size: 10px; cursor: pointer; display: flex; align-items: center; gap: 3px;
+        }
+        .cyber-unlink-btn:hover { border-color: var(--bad); color: var(--bad); }
+
+        /* Standard Auto-wrapping Pipeline Layout */
+        .standard-pipeline-viewport {
+          width: 100%; height: 100%; overflow-y: auto; padding: 65px 24px 30px; box-sizing: border-box;
+        }
+        .standard-pipeline-wrap {
+          display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; width: 100%;
+        }
+        .standard-pipeline-wrap::-webkit-scrollbar { width: 8px; }
+        .standard-pipeline-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+        .pipeline-card {
+          flex: 0 1 290px; min-width: 260px; max-width: 320px;
+          background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+          padding: 14px; box-shadow: 0 4px 16px rgba(0,0,0,0.3); transition: transform 0.15s ease;
+        }
+        .pipeline-card.station { border-top: 3px solid var(--bev); }
+        .pipeline-card.start { border-top: 3px solid var(--good); }
+        .pipeline-card.waypoint { border-top: 3px solid var(--text-dim); }
+
+        .pipeline-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+        .pipeline-title { font-size: 13px; font-weight: 700; color: var(--text); }
+        .pipeline-footer-stat { font-size: 11px; color: var(--text-dim); margin-top: 6px; }
+
+        .pipeline-connector-pill {
+          display: flex; align-items: center; justify-content: center; padding: 0 2px;
+          align-self: center; position: relative;
+        }
+        .pipeline-line {
+          width: 22px; height: 2px; background: linear-gradient(90deg, var(--bev), var(--cyber-cyan)); opacity: 0.6;
+        }
+        .pipeline-distance-chip {
+          position: absolute; top: -14px; background: #07090e; border: 1px solid var(--border);
+          border-radius: 10px; padding: 2px 6px; font-size: 9px; font-family: 'JetBrains Mono', monospace;
+          color: var(--text-dim); white-space: nowrap;
+        }
       `}</style>
 
       {/* Header controls */}
       <div className="header">
         <div>
-          <h1>
-            <Truck size={26} style={{ display: "inline", verticalAlign: "-4px", marginRight: 10, color: "var(--bev)" }} />
-            Logistics & Duty Cycle TCO Simulator
-          </h1>
+          <div className="header-title">
+            <Activity size={24} style={{ color: "var(--cyber-mint)" }} />
+            Commercial Fleet Logistics & Duty Cycle TCO Simulator
+          </div>
+          <div style={{ fontSize: "12px", color: "var(--text-dim)", marginTop: "4px" }}>
+            High-precision DCF Lifecycle Costing & EV Infrastructure Digital Twin Engine
+          </div>
         </div>
         <div style={{ display: "flex", gap: "10px" }}>
           <button className="theme-btn" onClick={() => setDarkMode(!darkMode)}>
-            {darkMode ? <Sun size={15} /> : <Moon size={15} />}
-            {darkMode ? "Light Mode" : "Dark Mode"}
+            {darkMode ? <Sun size={14} /> : <Moon size={14} />}
+            {darkMode ? "Light" : "Dark"}
           </button>
           <button className="reset-btn" onClick={() => {
             setRouteSegments(DEFAULT_ROUTE.map((s, i) => ({ ...s, monthlyTonnage: i === 1 ? 0 : 85000 })));
@@ -1744,7 +2026,7 @@ export default function ComprehensiveTCOCalculator() {
             setChargingStationOverrides({});
             resetMatrices();
           }}>
-            <RotateCcw size={15} /> Reset
+            <RotateCcw size={14} /> Reset
           </button>
         </div>
       </div>
@@ -1767,13 +2049,13 @@ export default function ComprehensiveTCOCalculator() {
         <div className="alert-strip">
           <AlertTriangle size={20} style={{ flexShrink: 0, color: "var(--bad)" }} />
           <div>
-            <strong style={{ display: "block", marginBottom: "4px", fontSize: "14px" }}>Payload Sizing Violations Detected!</strong>
+            <strong style={{ display: "block", marginBottom: "4px", fontSize: "13.5px" }}>Payload Sizing Violations Detected!</strong>
             The cargo payload configured for some route segments exceeds the maximum carrying capacity of your vehicles.
-            <div style={{ marginTop: "8px", display: "flex", flexDirection: "column", gap: "4px" }}>
+            <div style={{ marginTop: "6px", display: "flex", flexDirection: "column", gap: "3px" }}>
               {results.computedVehicles.map(v => {
                 if (v.segmentOverloads.length === 0) return null;
                 return (
-                  <div key={v.id} style={{ fontSize: "12px", color: "var(--text-dim)" }}>
+                  <div key={v.id} style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>
                     · <strong>{v.name}</strong> payload capacity is capped at <strong>{v.payloadCap.toFixed(1)}T</strong>. 
                   </div>
                 );
@@ -1837,10 +2119,10 @@ export default function ComprehensiveTCOCalculator() {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
             <h2 style={{ margin: 0, borderBottom: 'none' }}><Truck size={20} color="var(--bev)" /> 2. Fleet Vehicle Profiles</h2>
             <div style={{ display: "flex", gap: "10px" }}>
-              <button className="theme-btn" style={{ borderColor: "var(--diesel)", background: "rgba(226, 149, 50, 0.04)" }} onClick={() => handleAddVehicle("diesel")}>
+              <button className="theme-btn" style={{ borderColor: "var(--diesel)", background: "rgba(245, 158, 11, 0.05)" }} onClick={() => handleAddVehicle("diesel")}>
                 <Plus size={14} /> Add Diesel
               </button>
-              <button className="theme-btn" style={{ borderColor: "var(--bev)", background: "rgba(33, 196, 175, 0.04)" }} onClick={() => handleAddVehicle("electric")}>
+              <button className="theme-btn" style={{ borderColor: "var(--bev)", background: "rgba(0, 229, 163, 0.05)" }} onClick={() => handleAddVehicle("electric")}>
                 <Plus size={14} /> Add EV
               </button>
             </div>
@@ -1854,7 +2136,7 @@ export default function ComprehensiveTCOCalculator() {
               <div key={v.id} className={`vehicle-card ${v.type === "electric" ? "active-electric" : "active-diesel"}`}>
                 <div className="vcard-header">
                   <div>
-                    <span style={{ fontSize: "10px", textTransform: "uppercase", fontWeight: "700", color: v.type === "electric" ? "var(--bev)" : "var(--diesel)" }}>
+                    <span style={{ fontSize: "10px", textTransform: "uppercase", fontWeight: "800", color: v.type === "electric" ? "var(--bev)" : "var(--diesel)" }}>
                       {v.type.toUpperCase()} Specifications
                     </span>
                     <input
@@ -1941,7 +2223,7 @@ export default function ComprehensiveTCOCalculator() {
 
                 <div className="section-tag">Tyre Layout & Costing</div>
                 <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "8px", padding: "10px", display: "flex", gap: "12px", flexDirection: "column" }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1.5fr 1.5fr", gap: "8px", fontSize: "11px", fontWeight: 600, color: "var(--text-dim)", textAlign: "center" }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1.5fr 1fr 1.5fr 1.5fr", gap: "8px", fontSize: "11px", fontWeight: 700, color: "var(--text-dim)", textAlign: "center" }}>
                     <div style={{ textAlign: "left" }}>Axle</div>
                     <div>Tyres</div>
                     <div>Cost/Tyre</div>
@@ -2147,7 +2429,6 @@ export default function ComprehensiveTCOCalculator() {
                                     const currentVal = getSegPayload(seg, v.id);
                                     const warnKey = `${seg.id}_${v.id}`;
                                     const isWarning = !!payloadWarnings[warnKey];
-                                    const isOverloaded = currentVal > cap;
                                     const multiplier = computeWeightedMultiplier(seg.stretches, v.allowOverloading ? currentVal : Math.min(currentVal, cap), v.type, dieselMatrix, evMatrix);
 
                                     return (
@@ -2225,7 +2506,7 @@ export default function ComprehensiveTCOCalculator() {
         <div className="panel">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px" }}>
             <h2 style={{ margin: 0, padding: 0, borderBottom: 'none' }}><Activity size={18} color="var(--bev)" /> 4. Efficiency Multipliers</h2>
-            <div className="seg" style={{ width: "220px" }}>
+            <div className="seg" style={{ width: "240px" }}>
               <button className={matrixEditMode === "diesel" ? "active" : ""} onClick={() => setMatrixEditMode("diesel")}>Diesel Matrices</button>
               <button className={matrixEditMode === "electric" ? "active" : ""} onClick={() => setMatrixEditMode("electric")}>EV Matrices</button>
             </div>
@@ -2281,15 +2562,15 @@ export default function ComprehensiveTCOCalculator() {
 
       {/* SECTION 5: Analytics Dashboard */}
       {activeTab === 'results' && (
-        <div className="panel" style={{ border: "2px solid var(--bev)", boxShadow: "var(--shadow-glow)" }}>
+        <div className="panel" style={{ border: "1px solid var(--bev)", boxShadow: "var(--shadow-glow)" }}>
           <h2 style={{ color: "var(--bev)", marginBottom: "16px" }}><TrendingUp size={20} /> 5. Analytics Dashboard</h2>
           
           {results.firstDiesel && results.firstElectric && (
             <div className="breakeven-strip">
               <TrendingUp size={22} style={{ flexShrink: 0, color: "var(--bev)" }} />
-              <strong style={{ fontSize: "14px" }}>
+              <strong style={{ fontSize: "13.5px" }}>
                 {results.breakevenYear !== null
-                  ? `Breakeven: EV cheaper than Diesel from Year ${results.breakevenYear.toFixed(1)}`
+                  ? `Breakeven: EV lifecycle TCO becomes cheaper than Diesel from Year ${results.breakevenYear.toFixed(1)}`
                   : "No breakeven within the analysis horizon"}
               </strong>
             </div>
@@ -2346,11 +2627,11 @@ export default function ComprehensiveTCOCalculator() {
 
               {results.computedVehicles.length > 0 && (
                 <div style={{ marginBottom: "28px" }}>
-                  <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                     <Activity size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-                    Fleet Comparison Snapshot
+                    Fleet Operational Radar Snapshot
                   </h3>
-                  <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "10px", padding: "16px" }}>
+                  <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "12px", padding: "16px" }}>
                     <ResponsiveContainer width="100%" height={320}>
                       <RadarChart cx="50%" cy="50%" outerRadius="75%" data={results.radarData}>
                         <PolarGrid stroke="var(--border)" />
@@ -2368,21 +2649,21 @@ export default function ComprehensiveTCOCalculator() {
               )}
 
               <div style={{ marginBottom: "28px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <Clock size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
-                  Time Allocation Breakdown (% of Trip Cycle)
+                  Time Allocation Breakdown (% of Trip Turnaround Cycle)
                 </h3>
-                <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "10px", padding: "16px" }}>
+                <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "12px", padding: "16px" }}>
                   <ResponsiveContainer width="100%" height={160}>
                     <BarChart data={results.timeUtilizationData} layout="vertical" margin={{ top: 5, right: 25, left: 40, bottom: 5 }}>
                       <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" horizontal={false} />
                       <XAxis type="number" domain={[0, 100]} unit="%" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: 'var(--text-dim)' }} />
-                      <YAxis type="category" dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: 'var(--text-dim)' }} width={130} />
+                      <YAxis type="category" dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fill: 'var(--text-dim)' }} width={140} />
                       <Tooltip contentStyle={{ background: "var(--panel)", border: "1px solid var(--border)", color: "var(--text)" }} formatter={(v) => `${Number(v).toFixed(1)}%`} />
                       <Legend wrapperStyle={{ fontSize: 11 }} />
-                      <Bar dataKey="Driving" stackId="a" fill="#21bfa9" />
-                      <Bar dataKey="Load/Unload" stackId="a" fill="#8b5cf6" />
-                      <Bar dataKey="Refuel / Charge" stackId="a" fill="#ef4444" />
+                      <Bar dataKey="Driving" stackId="a" fill="#00e5a3" />
+                      <Bar dataKey="Load/Unload" stackId="a" fill="#818cf8" />
+                      <Bar dataKey="Refuel / Charge" stackId="a" fill="#f43f5e" />
                       <Bar dataKey="Rest/Queue" stackId="a" fill="#64748b" />
                     </BarChart>
                   </ResponsiveContainer>
@@ -2390,7 +2671,7 @@ export default function ComprehensiveTCOCalculator() {
               </div>
 
               <div style={{ marginTop: "16px", marginBottom: "24px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <DollarSign size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
                   Capital Deployment & Infrastructure Summary
                 </h3>
@@ -2405,7 +2686,7 @@ export default function ComprehensiveTCOCalculator() {
                     <tbody>
                       {results.computedVehicles.map((v) => (
                         <tr key={v.id}>
-                          <td style={{ color: colorForVehicle(v, results.computedVehicles), fontWeight: 600 }}>{v.name}</td>
+                          <td style={{ color: colorForVehicle(v, results.computedVehicles), fontWeight: 700 }}>{v.name}</td>
                           <td className="num">{v.fleetSizeRequired}</td>
                           <td className="num">{inr(v.totalUpfrontGSTPrice)}</td>
                           <td className="num">{inr(v.loanUpfrontDownpayment)}</td>
@@ -2426,11 +2707,11 @@ export default function ComprehensiveTCOCalculator() {
           {activeResultTab === 'segment' && (
             <div className="anim-fade">
               <div style={{ marginBottom: "28px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <BarChart3 size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
                   Estimated Segment Freight Rates (₹/Ton)
                 </h3>
-                <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "10px", padding: "16px" }}>
+                <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: "12px", padding: "16px" }}>
                   <ResponsiveContainer width="100%" height={260}>
                     <BarChart data={results.segmentFreightData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
                       <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
@@ -2447,7 +2728,7 @@ export default function ComprehensiveTCOCalculator() {
               </div>
 
               <div style={{ marginBottom: "24px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "6px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <Route size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
                   Cost & Estimated Freight Rate by Segment
                 </h3>
@@ -2463,13 +2744,13 @@ export default function ComprehensiveTCOCalculator() {
                     </thead>
                     <tbody>
                       <tr style={{ background: "var(--panel-alt)" }}>
-                        <td><strong>Total Loop (Socialized)</strong><span style={{ display: "block", fontSize: "9px", color: "var(--text-dim)", marginTop: "2px" }}>Per-ton sides added; / total distance</span></td>
+                        <td><strong>Total Loop (Socialized)</strong><span style={{ display: "block", fontSize: "9.5px", color: "var(--text-dim)", marginTop: "2px" }}>Per-ton sides added; / total distance</span></td>
                         {results.computedVehicles.map((v) => (
                           <td key={v.id} className="num" style={{ color: colorForVehicle(v, results.computedVehicles) }}>
-                            <div style={{ fontSize: "10px", color: "var(--text-dim)" }}>Cost: ₹{Math.round(v.loopCostPerTonneTrip)} / Ton</div>
-                            <div style={{ fontSize: "10px", color: "var(--text-dim)", marginTop: "2px" }}>Cost: ₹{v.loopCostPerTonneKm.toFixed(3)} / Ton-km</div>
+                            <div style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Cost: ₹{Math.round(v.loopCostPerTonneTrip)} / Ton</div>
+                            <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginTop: "2px" }}>Cost: ₹{v.loopCostPerTonneKm.toFixed(3)} / Ton-km</div>
                             <div style={{ fontWeight: 700, marginTop: "5px" }}>Freight: ₹{Math.round(v.totalFreightRatePerTonneTrip)} / Ton</div>
-                            <div style={{ fontSize: "11px", fontWeight: 600, marginTop: "2px" }}>₹{v.requiredFreightRatePerTonneKm.toFixed(3)} / Ton-km</div>
+                            <div style={{ fontSize: "11px", fontWeight: 700, marginTop: "2px" }}>₹{v.requiredFreightRatePerTonneKm.toFixed(3)} / Ton-km</div>
                           </td>
                         ))}
                       </tr>
@@ -2481,9 +2762,9 @@ export default function ComprehensiveTCOCalculator() {
                             if (!segData || segData.freightRatePerTonneSeg === null) return <td key={v.id} className="num" style={{ color: "var(--text-dim)" }}>—</td>;
                             return (
                               <td key={v.id} className="num">
-                                <div style={{ fontSize: "10px", color: "var(--text-dim)" }}>Cost: ₹{Math.round(segData.costPerTonneSeg)} / Ton</div>
-                                <div style={{ fontSize: "10px", color: "var(--text-dim)", marginTop: "2px" }}>Cost: ₹{segData.costPerTonneKmSeg.toFixed(3)} / Ton-km</div>
-                                <div style={{ fontWeight: 600, color: "var(--text)", marginTop: "5px" }}>Freight: ₹{Math.round(segData.freightRatePerTonneSeg)} / Ton</div>
+                                <div style={{ fontSize: "10.5px", color: "var(--text-dim)" }}>Cost: ₹{Math.round(segData.costPerTonneSeg)} / Ton</div>
+                                <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginTop: "2px" }}>Cost: ₹{segData.costPerTonneKmSeg.toFixed(3)} / Ton-km</div>
+                                <div style={{ fontWeight: 700, color: "var(--text)", marginTop: "5px" }}>Freight: ₹{Math.round(segData.freightRatePerTonneSeg)} / Ton</div>
                                 <div style={{ fontSize: "11px", color: "var(--text)", marginTop: "2px" }}>₹{segData.freightRatePerTonneKmSeg.toFixed(3)} / Ton-km</div>
                               </td>
                             );
@@ -2501,8 +2782,8 @@ export default function ComprehensiveTCOCalculator() {
           {activeResultTab === 'timeline' && (
             <div className="anim-fade">
               <div style={{ marginTop: "16px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
-                  Lifecycle Cost Accrual Over Project Horizon ({results.years} Years) {enableDiscounting ? "(Discounted NPV)" : "(Nominal)"}
+                <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                  Lifecycle Cost Accrual Over Project Horizon ({results.years} Years) {enableDiscounting ? "(Discounted Present Value NPV)" : "(Nominal Cashflow)"}
                 </h3>
                 <ResponsiveContainer width="100%" height={340}>
                   <LineChart data={results.chartData} margin={{ top: 10, right: 30, left: 10, bottom: 25 }}>
@@ -2519,7 +2800,7 @@ export default function ComprehensiveTCOCalculator() {
               </div>
 
               <div style={{ marginTop: "32px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "12px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   Cost Category Breakdown Comparison
                 </h3>
                 <ResponsiveContainer width="100%" height={380}>
@@ -2553,7 +2834,7 @@ export default function ComprehensiveTCOCalculator() {
               </div>
 
               <div style={{ marginTop: "36px", marginBottom: "20px" }}>
-                <h3 style={{ fontSize: "15px", textTransform: "uppercase", marginBottom: "16px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
+                <h3 style={{ fontSize: "14px", textTransform: "uppercase", fontWeight: 700, marginBottom: "16px", borderBottom: "1px solid var(--border)", paddingBottom: "6px", color: "var(--text)" }}>
                   <PieChartIcon size={15} style={{ display: "inline", verticalAlign: "-2px", marginRight: 6, color: "var(--bev)" }} />
                   Cost Breakdown Split (Per Vehicle)
                 </h3>
@@ -2576,7 +2857,7 @@ export default function ComprehensiveTCOCalculator() {
 
                     return (
                       <div key={v.id} className="donut-card" style={{ borderTop: `4px solid ${colorForVehicle(v, results.computedVehicles)}` }}>
-                        <div style={{ fontSize: "12.5px", fontWeight: 700, textTransform: "uppercase", marginBottom: "12px", color: "var(--text-dim)" }}>
+                        <div style={{ fontSize: "13px", fontWeight: 700, textTransform: "uppercase", marginBottom: "12px", color: "var(--text)" }}>
                           {v.name} Total TCO Split
                         </div>
                         <ResponsiveContainer width="100%" height={220}>
@@ -2630,7 +2911,6 @@ export default function ComprehensiveTCOCalculator() {
               ) : (
                 <>
                   <div style={{ background: "var(--panel-alt)", padding: "2px", borderRadius: "14px", marginBottom: "24px" }}>
-                    
                     {results.computedVehicles.map((v) => {
                       if (v.type !== "electric") return null;
                       const dod = 100 - (v.safeSoCThreshold || 0);
@@ -2639,9 +2919,11 @@ export default function ComprehensiveTCOCalculator() {
                       return (
                         <div key={v.id} style={{ marginBottom: "10px" }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 20px" }}>
-                            <strong style={{ fontSize: "15px", color: colorForVehicle(v, results.computedVehicles) }}>{v.name} Setup</strong>
+                            <strong style={{ fontSize: "15px", color: colorForVehicle(v, results.computedVehicles), display: "flex", alignItems: "center", gap: "6px" }}>
+                              <Zap size={16} /> {v.name} Network Layout
+                            </strong>
                             <div style={{ fontSize: "11.5px", color: "var(--text-dim)" }}>
-                              Usable DOD: <strong className="num" style={{ color: "var(--bev)" }}>{dod.toFixed(0)}%</strong> · Total Plugs Sized: <strong className="num">{v.totalChargersNeeded} plugs</strong>
+                              Usable DOD: <strong className="num" style={{ color: "var(--bev)" }}>{dod.toFixed(0)}%</strong> · Sized Plugs: <strong className="num">{v.totalChargersNeeded} plugs</strong>
                             </div>
                           </div>
 
@@ -2664,8 +2946,8 @@ export default function ComprehensiveTCOCalculator() {
                   <div className="grid-2" style={{ marginBottom: "24px" }}>
                     <div className="kpi-card" style={{ background: "var(--panel)" }}>
                       <div className="kpi-label"><Activity size={15} style={{ marginRight: 6 }} /> Battery SOH Degradation Timeline (% SOH)</div>
-                      <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginBottom: "8px" }}>
-                        Non-linear fade: slow to the "knee", then accelerating toward end-of-life, with pack swap restorations.
+                      <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "10px" }}>
+                        Non-linear knee degradation model reflecting real-world LFP pack chemistry & DoD fatigue.
                       </div>
                       <ResponsiveContainer width="100%" height={220}>
                         <LineChart data={results.multiEvSohData} margin={{ top: 10, right: 20, left: -20, bottom: 0 }}>
@@ -2683,8 +2965,8 @@ export default function ComprehensiveTCOCalculator() {
 
                     <div className="kpi-card" style={{ background: "var(--panel)" }}>
                       <div className="kpi-label"><Battery size={15} style={{ marginRight: 6 }} /> Indicative Operational Range Over Lifecycle (km)</div>
-                      <div style={{ fontSize: "10.5px", color: "var(--text-dim)", marginBottom: "8px" }}>
-                        Effective usable range trajectory as the pack degrades and is restored over time.
+                      <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "10px" }}>
+                        Effective usable range trajectory as the battery pack ages and is restored over time.
                       </div>
                       <ResponsiveContainer width="100%" height={220}>
                         <LineChart data={results.multiEvRangeData} margin={{ top: 10, right: 20, left: -10, bottom: 0 }}>
@@ -2709,8 +2991,8 @@ export default function ComprehensiveTCOCalculator() {
                           <div className="kpi-label">{v.name} Battery Sizing & Lifecycle</div>
                           <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "12px" }}>
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Theoretical Range (100% SOH):</span><strong className="num" style={{ fontSize: "12px" }}>{Math.round(v.maxTheoreticalRange)} km</strong></div>
-                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at Start (100% SOH):</span><strong className="num badge badge-info" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtStart)} km</strong></div>
-                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at SOH Limit:</span><strong className="num badge badge-warn" style={{ fontSize: "12px" }}>{Math.round(v.operationalRangeAtSOHLimit)} km</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at Start (100% SOH):</span><strong className="num cyber-badge badge-info" style={{ fontSize: "11px" }}>{Math.round(v.operationalRangeAtStart)} km</strong></div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Op. Range at SOH Limit:</span><strong className="num cyber-badge badge-warn" style={{ fontSize: "11px" }}>{Math.round(v.operationalRangeAtSOHLimit)} km</strong></div>
                             <hr style={{ border: 0, borderBottom: "1px solid var(--border)", margin: "4px 0" }} />
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>Avg. Route Depth-of-Discharge:</span><strong className="num" style={{ fontSize: "12px" }}>{(v.avgDoDFraction * 100).toFixed(1)}%</strong></div>
                             <div style={{ display: "flex", justifyContent: "space-between" }}><span style={{ fontSize: "12px", color: "var(--text-dim)" }}>DoD-Adjusted Cycle Life:</span><strong className="num" style={{ fontSize: "12px" }}>{Math.round(v.cyclesToEOL)} cycles</strong></div>
